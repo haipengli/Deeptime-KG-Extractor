@@ -1,15 +1,21 @@
 
+
 export interface Triple {
   subject: string;
   predicate: string;
   object: string;
   evidenceText: string;
   source: string;
+  confidence?: number;
+  justification?: string;
 }
 
 export interface ExtractedEntity {
   name: string;
+  type: string;
   selected: boolean;
+  confidence?: number;
+  justification?: string;
 }
 
 export interface SchemaSuggestion {
@@ -33,6 +39,12 @@ export interface DocumentSection {
     selected: boolean;
 }
 
+export interface Predicate {
+  description: string;
+  domain: string[];
+  range: string[];
+}
+
 export interface Schema {
   meta: {
     id: string;
@@ -40,6 +52,7 @@ export interface Schema {
   };
   predicates: {
     predicateCategories: Record<string, string[]>;
+    definitions: Record<string, Predicate>;
     alias_map: Record<string, string[]>;
   };
   observableAxis: Record<string, { concepts: any }>;
@@ -67,6 +80,6 @@ export type ExtractionStep =
   | 'error';
 
 export interface TurboOutput {
-    entities: string[];
+    entities: Omit<ExtractedEntity, 'selected'>[];
     triples: Omit<Triple, 'source'>[];
 }

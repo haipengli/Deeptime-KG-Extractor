@@ -1,6 +1,7 @@
 
+
 import React, { useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from 'react';
-import type { Triple, Schema, LLMProvider, ExtractedEntity, ExtractionStep, SchemaSuggestion, DocumentSection } from './types';
+import type { Triple, Schema, LLMProvider, ExtractedEntity, ExtractionStep, SchemaSuggestion, DocumentSection, TurboOutput } from './types';
 import { View } from './types';
 import { extractEntities, extractRelationships, suggestRelationships, extractInTurboMode } from './services/extractionService';
 import { parsePdfToSections } from './services/pdfParsingService';
@@ -23,7 +24,7 @@ interface ManagedFile {
 }
 
 interface CachedResult {
-  entities: ExtractedEntity[];
+  entities: Omit<ExtractedEntity, 'selected'>[];
   triples: Omit<Triple, 'source'>[];
   suggestions: SchemaSuggestion[];
 }
@@ -333,7 +334,7 @@ const App: React.FC = () => {
                 updateFileStatus(file.name, { step: 'extractingRelationships' });
                 const text = getTextForFile(file);
                 const result = await extractInTurboMode(llmProvider, apiKey, text, schema, modelName, signal);
-                return { entities: result.entities.map(name => ({ name, selected: true })), triples: result.triples, suggestions: [] };
+                return { ...result, suggestions: [] };
             };
             const onResult = (file: ManagedFile, result: CachedResult) => {
                 localResults.set(file.name, result);
@@ -352,11 +353,11 @@ const App: React.FC = () => {
                 const text = getTextForFile(file);
                 const { entities, suggestions } = await extractEntities(llmProvider, apiKey, text, schema, modelName, signal);
                 return {
-                    entities: entities.sort().map(name => ({ name, selected: true })),
+                    entities,
                     suggestions: suggestions.filter(s => s.type === 'entity')
                 };
             };
-            const onResult = (file: ManagedFile, result: { entities: ExtractedEntity[], suggestions: SchemaSuggestion[] }) => {
+            const onResult = (file: ManagedFile, result: { entities: Omit<ExtractedEntity, 'selected'>[], suggestions: SchemaSuggestion[] }) => {
                 const existing = localResults.get(file.name) || { entities: [], triples: [], suggestions: [] };
                 localResults.set(file.name, { ...existing, entities: result.entities, suggestions: result.suggestions });
             };
@@ -382,7 +383,7 @@ const App: React.FC = () => {
         result.entities.forEach(entity => {
             if (!uniqueEntityNames.has(entity.name)) {
                 uniqueEntityNames.add(entity.name);
-                allEntities.push(entity);
+                allEntities.push({ ...entity, selected: true });
             }
         });
         allSuggestions.push(...result.suggestions);
@@ -425,15 +426,15 @@ const App: React.FC = () => {
         const text = getTextForFile(file);
         if (!text) return { triples: [], suggestions: [] };
         updateFileStatus(file.name, { step: 'extractingRelationships' });
-        const selectedEntityNames = entities.filter(e => e.selected).map(e => e.name);
+        const selectedEntities = entities.filter(e => e.selected);
 
         const fileTriples = await extractRelationships(
-            llmProvider, apiKey, text, activeSchema, selectedEntityNames, modelName, signal
+            llmProvider, apiKey, text, activeSchema, selectedEntities, modelName, signal
         );
         if (signal.aborted) throw new Error("Aborted");
         
         const fileSuggestions = await suggestRelationships(
-            llmProvider, apiKey, text, activeSchema, selectedEntityNames, modelName, signal
+            llmProvider, apiKey, text, activeSchema, selectedEntities, modelName, signal
         );
         if (signal.aborted) throw new Error("Aborted");
 
@@ -449,7 +450,7 @@ const App: React.FC = () => {
         const finalEntities = entities.filter(e => e.selected); 
         const entitySuggestions = suggestions.filter(s => s.type === 'entity');
         const finalSuggestions = [...entitySuggestions, ...result.suggestions];
-        const cacheData: CachedResult = { entities: finalEntities, triples: result.triples, suggestions: finalSuggestions };
+        const cacheData: CachedResult = { entities: finalEntities.map(({selected, ...rest}) => rest), triples: result.triples, suggestions: finalSuggestions };
         localStorage.setItem(cacheKey, JSON.stringify(cacheData));
     };
 
@@ -511,14 +512,23 @@ const App: React.FC = () => {
   
   const generateCypherScript = useCallback(() => {
     const escape = (str: string) => JSON.stringify(str);
-    const uniqueEntities = new Set(triples.flatMap(t => [t.subject, t.object]));
-    const nodeStmts = [...uniqueEntities].map(e => `MERGE (:Entity {name: ${escape(e)}});`).join('\n');
+    
+    // Use the full entity list to get types
+    const entityTypeMap = new Map(entities.map(e => [e.name, e.type]));
+
+    const nodeStmts = entities
+        .filter(e => triples.some(t => t.subject === e.name || t.object === e.name))
+        .map(e => `MERGE (:${e.type} {name: ${escape(e.name)}});`)
+        .join('\n');
+
     const relStmts = triples.map(t => {
         const pred = t.predicate.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
-        return `MATCH (s:Entity {name: ${escape(t.subject)}}), (o:Entity {name: ${escape(t.object)}})\nMERGE (s)-[r:${pred}]->(o)\nSET r.evidence = ${escape(t.evidenceText)}, r.source = ${escape(t.source)};`;
+        const subjectType = entityTypeMap.get(t.subject) || 'Entity';
+        const objectType = entityTypeMap.get(t.object) || 'Entity';
+        return `MATCH (s:${subjectType} {name: ${escape(t.subject)}}), (o:${objectType} {name: ${escape(t.object)}})\nMERGE (s)-[r:${pred}]->(o)\nSET r.evidence = ${escape(t.evidenceText)}, r.source = ${escape(t.source)}, r.confidence = ${t.confidence}, r.justification = ${escape(t.justification || '')};`;
     }).join('\n');
     return `// Generated by DeepTime KG Extractor\n${nodeStmts}\n\n${relStmts}`;
-  }, [triples]);
+  }, [triples, entities]);
 
   const ApiConfig: React.FC = () => {
     const [newApiKey, setNewApiKey] = useState('');
@@ -652,157 +662,169 @@ const App: React.FC = () => {
     </div>
   );
 
-  const ResultsView: React.FC = () => (
-    <div className="w-full lg:w-2/3 xl:w-3/4 p-4">
-      <div className="bg-white p-6 rounded-lg shadow-lg border border-gray-200 h-[calc(100vh-120px)] flex flex-col">
-        { (step === 'reviewing' || step === 'complete' || step === 'extractingRelationships') && (
-            <div className="flex justify-between items-center mb-4 pb-4 border-b">
-                <h2 className="text-2xl font-bold text-brand-dark">
-                  {step === 'reviewing' ? "Review Extracted Entities" : `Extracted Triples (${triples.length})`}
-                </h2>
-                 {step === 'reviewing' && entities.length > 0 && <div className="relative" ref={entityExportMenuRef}>
-                    <button onClick={() => setIsEntityExportMenuOpen(!isEntityExportMenuOpen)} className="flex items-center space-x-2 text-sm font-semibold py-2 px-4 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
-                        <DownloadIcon className="w-5 h-5" /><span>Export</span><ChevronDownIcon className={`w-4 h-4 transition-transform ${isEntityExportMenuOpen ? 'rotate-180' : ''}`} />
-                    </button>
-                    {isEntityExportMenuOpen && (
-                        <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-10 border py-1">
-                           <button onClick={() => { handleCopy(entities.filter(e => e.selected).map(e => e.name)); setIsEntityExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
-                               {isCopied ? <CheckIcon className="w-5 h-5 text-green-500"/> : <CopyIcon className="w-5 h-5" />}<span>{isCopied ? 'Copied!' : 'Copy as JSON'}</span>
-                           </button>
-                           <button onClick={() => { handleDownload(entities.filter(e => e.selected).map(e => e.name), `deeptimedb_entities_${Date.now()}.json`); setIsEntityExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
-                               <DownloadIcon className="w-5 h-5" /><span>Download JSON</span>
-                           </button>
-                        </div>
-                    )}
-                </div>}
-                 {triples.length > 0 && step !== 'reviewing' && <div className="relative" ref={exportMenuRef}>
-                    <button onClick={() => setIsExportMenuOpen(!isExportMenuOpen)} className="flex items-center space-x-2 text-sm font-semibold py-2 px-4 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
-                        <DownloadIcon className="w-5 h-5" /><span>Export</span><ChevronDownIcon className={`w-4 h-4 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
-                    </button>
-                    {isExportMenuOpen && (
-                        <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-10 border py-1">
-                           <button onClick={() => { handleCopy(triples); setIsExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
-                               {isCopied ? <CheckIcon className="w-5 h-5 text-green-500"/> : <CopyIcon className="w-5 h-5" />}<span>{isCopied ? 'Copied!' : 'Copy as JSON'}</span>
-                           </button>
-                           <button onClick={() => { handleDownload(generateCypherScript(), `deeptimedb_export_${Date.now()}.cypher`); setIsExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
-                               <DatabaseIcon className="w-5 h-5" /><span>Export Cypher (Neo4j)</span>
-                           </button>
-                        </div>
-                    )}
-                </div>}
-            </div>
-        )}
-        
-        <div className="flex-grow overflow-y-auto pr-2" ref={resultsScrollRef}>
-            {processingStats && (step === 'complete' || step === 'error') && (
-                <div className="mb-4">
-                    <StatisticsDisplay stats={processingStats} />
+  const ResultsView: React.FC = () => {
+      const entityTypeMap = useMemo(() => new Map(entities.map(e => [e.name, e.type])), [entities]);
+
+      return (
+        <div className="w-full lg:w-2/3 xl:w-3/4 p-4">
+          <div className="bg-white p-6 rounded-lg shadow-lg border border-gray-200 h-[calc(100vh-120px)] flex flex-col">
+            { (step === 'reviewing' || step === 'complete' || step === 'extractingRelationships') && (
+                <div className="flex justify-between items-center mb-4 pb-4 border-b">
+                    <h2 className="text-2xl font-bold text-brand-dark">
+                      {step === 'reviewing' ? "Review Extracted Entities" : `Extracted Triples (${triples.length})`}
+                    </h2>
+                     {step === 'reviewing' && entities.length > 0 && <div className="relative" ref={entityExportMenuRef}>
+                        <button onClick={() => setIsEntityExportMenuOpen(!isEntityExportMenuOpen)} className="flex items-center space-x-2 text-sm font-semibold py-2 px-4 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
+                            <DownloadIcon className="w-5 h-5" /><span>Export</span><ChevronDownIcon className={`w-4 h-4 transition-transform ${isEntityExportMenuOpen ? 'rotate-180' : ''}`} />
+                        </button>
+                        {isEntityExportMenuOpen && (
+                            <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-10 border py-1">
+                               <button onClick={() => { handleCopy(entities.filter(e => e.selected).map(({ selected, ...rest }) => rest)); setIsEntityExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
+                                   {isCopied ? <CheckIcon className="w-5 h-5 text-green-500"/> : <CopyIcon className="w-5 h-5" />}<span>{isCopied ? 'Copied!' : 'Copy as JSON'}</span>
+                               </button>
+                               <button onClick={() => { handleDownload(entities.filter(e => e.selected).map(({ selected, ...rest }) => rest), `deeptimedb_entities_${Date.now()}.json`); setIsEntityExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
+                                   <DownloadIcon className="w-5 h-5" /><span>Download JSON</span>
+                               </button>
+                            </div>
+                        )}
+                    </div>}
+                     {triples.length > 0 && step !== 'reviewing' && <div className="relative" ref={exportMenuRef}>
+                        <button onClick={() => setIsExportMenuOpen(!isExportMenuOpen)} className="flex items-center space-x-2 text-sm font-semibold py-2 px-4 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
+                            <DownloadIcon className="w-5 h-5" /><span>Export</span><ChevronDownIcon className={`w-4 h-4 transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+                        </button>
+                        {isExportMenuOpen && (
+                            <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-10 border py-1">
+                               <button onClick={() => { handleCopy(triples); setIsExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
+                                   {isCopied ? <CheckIcon className="w-5 h-5 text-green-500"/> : <CopyIcon className="w-5 h-5" />}<span>{isCopied ? 'Copied!' : 'Copy as JSON'}</span>
+                               </button>
+                               <button onClick={() => { handleDownload(generateCypherScript(), `deeptimedb_export_${Date.now()}.cypher`); setIsExportMenuOpen(false); }} className="w-full text-left flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
+                                   <DatabaseIcon className="w-5 h-5" /><span>Export Cypher (Neo4j)</span>
+                               </button>
+                            </div>
+                        )}
+                    </div>}
                 </div>
             )}
-            {schemaHasChanged && step !== 'ready' && (
-                <div className="bg-blue-100 border-l-4 border-blue-500 text-blue-800 p-4 rounded-md flex items-start mb-4">
-                    <InfoIcon className="w-5 h-5 mr-3 flex-shrink-0 mt-0.5" />
-                    <div><p className="font-bold">Schema Changed</p><p>Your schema edits have been saved and will be applied on the next extraction.</p></div>
-                </div>
-            )}
-            {error && ( <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-md flex items-start" role="alert"> <AlertTriangleIcon className="w-5 h-5 mr-3 flex-shrink-0" /> <div> <p className="font-bold">Error</p> <p className="whitespace-pre-wrap">{error}</p> </div> </div> )}
-
-            {isProcessing && step !== 'reviewing' && ( <div className="flex flex-col items-center justify-center h-full text-brand-secondary"> <LoaderIcon className="w-12 h-12 animate-spin mb-4" /> <p className="text-lg font-semibold">Processing files...</p> </div> )}
             
-            {step === 'reviewing' && (
-                <>
-                <EntityList 
-                  entities={entities}
-                  sourceDescription={`${selectedFiles.size} file(s)`} 
-                  onEntitySelectionChange={(idx, sel) => {
-                      captureResultsScroll();
-                      setEntities(prev => prev.map((e, i) => i === idx ? { ...e, selected: sel } : e));
-                  }} 
-                  onSelectAll={() => {
-                      captureResultsScroll();
-                      setEntities(prev => prev.map(e => ({...e, selected: true})));
-                  }} 
-                  onSelectNone={() => {
-                      captureResultsScroll();
-                      setEntities(prev => prev.map(e => ({...e, selected: false})));
-                  }}
-                />
-                <SuggestionReviewer suggestions={suggestions.filter(s => s.type === 'entity')} onAccept={(sug) => {
-                    captureResultsScroll();
-                    let newSchema = { ...schema };
-                    const { name, categorySuggestion } = sug;
-                    const targetAxis = Object.keys(schema.observableAxis).find(k => k === categorySuggestion) ? 'observableAxis' : 'interpretiveAxis';
-                    if(schema[targetAxis][categorySuggestion!]) {
-                        const concepts = newSchema[targetAxis][categorySuggestion!].concepts;
-                        if(Array.isArray(concepts) && !concepts.includes(name)) concepts.push(name);
-                    } else { newSchema[targetAxis][categorySuggestion!] = { concepts: [name] }; }
-                    setSchema(newSchema);
-                    setSuggestions(prev => prev.filter(s => s !== sug));
-                }} onReject={(sug) => {
-                    captureResultsScroll();
-                    setSuggestions(prev => prev.filter(s => s !== sug));
-                }} />
-                 <div className="mt-4 pt-4 border-t flex items-center justify-end">
-                    <button onClick={handleExtractRelationships} className="bg-brand-secondary hover:bg-brand-primary text-white font-bold py-3 px-6 rounded-lg shadow-md transition-colors disabled:opacity-50" disabled={isProcessing || entities.filter(e => e.selected).length === 0}>
-                        Extract Relationships
-                    </button>
-                </div>
-                </>
-            )}
-            
-            {step === 'ready' && managedFiles.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full text-center text-gray-500">
-                <BrainCircuitIcon className="w-16 h-16 mb-4 text-gray-300"/>
-                <h3 className="text-xl font-semibold">Ready to Extract Knowledge</h3>
-                <p>Upload one or more PDF documents to begin.</p>
-              </div>
-            )}
-            
-             {step === 'ready' && managedFiles.length > 0 && selectedFiles.size === 0 && (
-                 <div className="flex flex-col items-center justify-center h-full text-center text-gray-500"><p>Select one or more documents to begin extraction.</p></div>
-            )}
-
-
-            {(step === 'extractingRelationships' || step === 'complete') && (
-              <>
-                {triples.length > 0 && (
-                  <div className="grid grid-cols-1 gap-4">
-                      {triples.map((triple, index) => ( <TripleCard key={`${triple.source}-${index}`} triple={triple} index={index} /> ))}
-                  </div>
+            <div className="flex-grow overflow-y-auto pr-2" ref={resultsScrollRef}>
+                {processingStats && (step === 'complete' || step === 'error') && (
+                    <div className="mb-4">
+                        <StatisticsDisplay stats={processingStats} />
+                    </div>
                 )}
-                <SuggestionReviewer suggestions={suggestions.filter(s => s.type === 'predicate')} onAccept={(sug) => {
-                    captureResultsScroll();
-                    if (sug.type === 'predicate') {
-                        setSchema(prevSchema => {
-                            const newSchema = JSON.parse(JSON.stringify(prevSchema));
-                            const category = "AI Suggested Predicates";
-                            if (!newSchema.predicates.predicateCategories[category]) {
-                                newSchema.predicates.predicateCategories[category] = [];
-                            }
-                            if (!newSchema.predicates.predicateCategories[category].includes(sug.name)) {
-                                newSchema.predicates.predicateCategories[category].push(sug.name);
-                            }
-                            return newSchema;
-                        });
-                    }
-                    setSuggestions(prev => prev.filter(s => s !== sug));
-                }} onReject={(sug) => {
-                    captureResultsScroll();
-                    setSuggestions(prev => prev.filter(s => s !== sug));
-                }} />
+                {schemaHasChanged && step !== 'ready' && (
+                    <div className="bg-blue-100 border-l-4 border-blue-500 text-blue-800 p-4 rounded-md flex items-start mb-4">
+                        <InfoIcon className="w-5 h-5 mr-3 flex-shrink-0 mt-0.5" />
+                        <div><p className="font-bold">Schema Changed</p><p>Your schema edits have been saved and will be applied on the next extraction.</p></div>
+                    </div>
+                )}
+                {error && ( <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-md flex items-start" role="alert"> <AlertTriangleIcon className="w-5 h-5 mr-3 flex-shrink-0" /> <div> <p className="font-bold">Error</p> <p className="whitespace-pre-wrap">{error}</p> </div> </div> )}
 
-                {triples.length === 0 && !isProcessing && (
+                {isProcessing && step !== 'reviewing' && ( <div className="flex flex-col items-center justify-center h-full text-brand-secondary"> <LoaderIcon className="w-12 h-12 animate-spin mb-4" /> <p className="text-lg font-semibold">Processing files...</p> </div> )}
+                
+                {step === 'reviewing' && (
+                    <>
+                    <EntityList 
+                      entities={entities}
+                      sourceDescription={`${selectedFiles.size} file(s)`} 
+                      onEntitySelectionChange={(idx, sel) => {
+                          captureResultsScroll();
+                          setEntities(prev => prev.map((e, i) => i === idx ? { ...e, selected: sel } : e));
+                      }} 
+                      onSelectAll={() => {
+                          captureResultsScroll();
+                          setEntities(prev => prev.map(e => ({...e, selected: true})));
+                      }} 
+                      onSelectNone={() => {
+                          captureResultsScroll();
+                          setEntities(prev => prev.map(e => ({...e, selected: false})));
+                      }}
+                    />
+                    <SuggestionReviewer suggestions={suggestions.filter(s => s.type === 'entity')} onAccept={(sug) => {
+                        captureResultsScroll();
+                        let newSchema = { ...schema };
+                        const { name, categorySuggestion } = sug;
+                        const targetAxis = Object.keys(schema.observableAxis).find(k => k === categorySuggestion) ? 'observableAxis' : 'interpretiveAxis';
+                        if(schema[targetAxis][categorySuggestion!]) {
+                            const concepts = newSchema[targetAxis][categorySuggestion!].concepts;
+                            if(Array.isArray(concepts) && !concepts.includes(name)) concepts.push(name);
+                        } else { newSchema[targetAxis][categorySuggestion!] = { concepts: [name] }; }
+                        setSchema(newSchema);
+                        setSuggestions(prev => prev.filter(s => s !== sug));
+                    }} onReject={(sug) => {
+                        captureResultsScroll();
+                        setSuggestions(prev => prev.filter(s => s !== sug));
+                    }} />
+                     <div className="mt-4 pt-4 border-t flex items-center justify-end">
+                        <button onClick={handleExtractRelationships} className="bg-brand-secondary hover:bg-brand-primary text-white font-bold py-3 px-6 rounded-lg shadow-md transition-colors disabled:opacity-50" disabled={isProcessing || entities.filter(e => e.selected).length === 0}>
+                            Extract Relationships
+                        </button>
+                    </div>
+                    </>
+                )}
+                
+                {step === 'ready' && managedFiles.length === 0 && (
                   <div className="flex flex-col items-center justify-center h-full text-center text-gray-500">
-                    <h3 className="text-xl font-semibold">No Relationships Found</h3>
-                    <p>The process completed, but no triples were extracted based on the selected entities and schema.</p>
+                    <BrainCircuitIcon className="w-16 h-16 mb-4 text-gray-300"/>
+                    <h3 className="text-xl font-semibold">Ready to Extract Knowledge</h3>
+                    <p>Upload one or more PDF documents to begin.</p>
                   </div>
                 )}
-              </>
-            )}
+                
+                 {step === 'ready' && managedFiles.length > 0 && selectedFiles.size === 0 && (
+                     <div className="flex flex-col items-center justify-center h-full text-center text-gray-500"><p>Select one or more documents to begin extraction.</p></div>
+                )}
+
+
+                {(step === 'extractingRelationships' || step === 'complete') && (
+                  <>
+                    {triples.length > 0 && (
+                      <div className="grid grid-cols-1 gap-4">
+                          {triples.map((triple, index) => ( 
+                              <TripleCard 
+                                key={`${triple.source}-${index}`} 
+                                triple={triple} 
+                                index={index} 
+                                subjectType={entityTypeMap.get(triple.subject)}
+                                objectType={entityTypeMap.get(triple.object)}
+                              /> 
+                          ))}
+                      </div>
+                    )}
+                    <SuggestionReviewer suggestions={suggestions.filter(s => s.type === 'predicate')} onAccept={(sug) => {
+                        captureResultsScroll();
+                        if (sug.type === 'predicate') {
+                            setSchema(prevSchema => {
+                                const newSchema = JSON.parse(JSON.stringify(prevSchema));
+                                const category = "AI Suggested Predicates";
+                                if (!newSchema.predicates.predicateCategories[category]) {
+                                    newSchema.predicates.predicateCategories[category] = [];
+                                }
+                                if (!newSchema.predicates.predicateCategories[category].includes(sug.name)) {
+                                    newSchema.predicates.predicateCategories[category].push(sug.name);
+                                }
+                                return newSchema;
+                            });
+                        }
+                        setSuggestions(prev => prev.filter(s => s !== sug));
+                    }} onReject={(sug) => {
+                        captureResultsScroll();
+                        setSuggestions(prev => prev.filter(s => s !== sug));
+                    }} />
+
+                    {triples.length === 0 && !isProcessing && (
+                      <div className="flex flex-col items-center justify-center h-full text-center text-gray-500">
+                        <h3 className="text-xl font-semibold">No Relationships Found</h3>
+                        <p>The process completed, but no triples were extracted based on the selected entities and schema.</p>
+                      </div>
+                    )}
+                  </>
+                )}
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-  );
+      );
+    }
 
   return (
     <div className="min-h-screen bg-brand-light font-sans">

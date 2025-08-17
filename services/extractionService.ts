@@ -1,65 +1,70 @@
+
+
 import { GoogleGenAI, Type } from "@google/genai";
-import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput } from '../types';
+import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput, ExtractedEntity } from '../types';
 
 // --- Utility Functions ---
 
-const serializeConcepts = (concepts: any, level = 0): string => {
+const flattenConcepts = (concepts: any): string[] => {
   if (Array.isArray(concepts)) {
-    return concepts.map(concept => {
-      if (typeof concept === 'string') return concept;
+    return concepts.flatMap(concept => {
+      if (typeof concept === 'string') return [concept];
       if (typeof concept === 'object' && concept !== null) {
         const key = Object.keys(concept)[0];
         const values = concept[key];
-        return `${key}: (${serializeConcepts(values, level + 1)})`;
+        return [key, ...flattenConcepts(values)];
       }
-      return '';
-    }).join(', ');
+      return [];
+    });
   }
   if (typeof concepts === 'object' && concepts !== null) {
-    return Object.entries(concepts).map(([key, value]) =>
-      `\n${' '.repeat(level * 2)}- ${key}: ${serializeConcepts(value, level + 1)}`
-    ).join('');
+    return Object.entries(concepts).flatMap(([key, value]) =>
+      [key, ...flattenConcepts(value)]
+    );
   }
-  return '';
+  return [];
 };
 
-const serializeAxis = (axis: Record<string, { concepts: any }>): string => {
-  return Object.entries(axis).map(([category, data]) =>
-    `  - ${category}: ${serializeConcepts(data.concepts)}`
-  ).join('\n');
+const getAllConcepts = (schema: Schema): string[] => {
+    const observable = Object.values(schema.observableAxis).flatMap(c => flattenConcepts(c.concepts));
+    const interpretive = Object.values(schema.interpretiveAxis).flatMap(c => flattenConcepts(c.concepts));
+    return [...new Set([...observable, ...interpretive])];
 };
 
-const getVisibleSchema = (schema: Schema): string => `
-    Observable Axis (Direct Observations):
-${serializeAxis(schema.observableAxis)}
 
-    Interpretive Axis (Conclusions & Inferences):
-${serializeAxis(schema.interpretiveAxis)}
+const generatePredicateReference = (schema: Schema): string => {
+    return Object.entries(schema.predicates.definitions)
+        .map(([name, def]) => {
+            return `
+- Predicate: "${name}"
+  - Description: ${def.description}
+  - Valid Subject Types (Domain): [${def.domain.join(', ')}]
+  - Valid Object Types (Range): [${def.range.join(', ')}]
 `;
+        }).join('');
+};
 
 
 // --- Step 1: Entity Extraction with Suggestions ---
 
 const generateEntityPrompt = (documentText: string, schema: Schema): string => {
-  const schemaSummary = getVisibleSchema(schema);
-  const observableCategories = Object.keys(schema.observableAxis).join(', ');
-  const interpretiveCategories = Object.keys(schema.interpretiveAxis).join(', ');
+  const allConcepts = getAllConcepts(schema);
 
   return `
     You are an expert AI assistant specializing in geological knowledge extraction. Your goal is to extract specific *instances* of the concepts defined in the schema. All extracted entities MUST be nouns or noun phrases.
-    Your task is to identify and list all potential named entities from the text.
-    You will perform two types of extraction simultaneously:
-    1.  **Existing Entities**: Identify entities that are specific instances of the concepts in the provided schema. For example, if the schema has a concept 'GeologicUnit', you should extract specific names like 'Lingshui Formation' or 'Yinggehai Formation', not the general term 'Formation' itself.
-    2.  **New Entity Suggestions**: Identify important, abstract, high-level domain-specific concepts that are NOT in the schema but should be. For example, 'Depositional Sequence' would be a good suggestion if it's a recurring theme not in the schema. 'Sequence A' would be a bad suggestion as it's an instance.
+    Your task is to identify and list all potential named entities from the text and assign a type to each one.
 
-    Schema of Concepts to look for:
-    ${schemaSummary}
+    You will perform two types of extraction simultaneously:
+    1.  **Existing Entities**: Identify entities that are specific instances of the concepts in the provided schema. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types". For example, if you find 'Lingshui Formation', its type should be 'Formation'.
+    2.  **New Entity Suggestions**: Identify important, abstract, high-level domain-specific concepts that are NOT in the schema but should be. For example, 'Depositional Sequence' would be a good suggestion if it's a recurring theme not in the schema.
+
+    Valid Entity Types:
+    [${allConcepts.join(', ')}]
 
     Output Format:
-    Your output MUST be a single, valid JSON object conforming to the required schema. It should contain two keys: 'entities' (an array of strings) and 'suggestions' (an array of suggestion objects).
-
-    - 'categorySuggestion' for new suggestions MUST be one of: ${observableCategories}, ${interpretiveCategories}.
-    - 'justification' should be a brief explanation of why it's a good suggestion.
+    Your output MUST be a single, valid JSON object conforming to the required schema. It should contain two keys: 'entities' (an array of entity objects) and 'suggestions' (an array of suggestion objects).
+    - For each entity, provide a 'name', its assigned 'type' from the list above, a 'confidence' score (0.0 to 1.0), and a brief 'justification'.
+    - 'justification' should explain why the text supports the extraction and typing.
 
     Now, process the following document text and extract all relevant entities and suggestions.
 
@@ -76,7 +81,7 @@ export const extractEntities = async (
     schema: Schema,
     modelName: string,
     abortSignal: AbortSignal
-): Promise<{ entities: string[], suggestions: SchemaSuggestion[] }> => {
+): Promise<{ entities: Omit<ExtractedEntity, 'selected'>[], suggestions: SchemaSuggestion[] }> => {
     if (provider !== 'gemini') {
         throw new Error(`${provider} is not yet supported. Please select Google Gemini.`);
     }
@@ -97,7 +102,19 @@ export const extractEntities = async (
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        entities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        entities: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    name: { type: Type.STRING },
+                                    type: { type: Type.STRING },
+                                    confidence: { type: Type.NUMBER },
+                                    justification: { type: Type.STRING }
+                                },
+                                required: ["name", "type", "confidence", "justification"]
+                            }
+                        },
                         suggestions: {
                             type: Type.ARRAY,
                             items: {
@@ -147,33 +164,33 @@ export const extractEntities = async (
 
 // --- Step 2: Relationship Extraction ---
 
-const generateRelationshipPrompt = (documentText: string, schema: Schema, entities: string[]): string => {
-  const predicateSummary = Object.entries(schema.predicates.predicateCategories)
-    .map(([category, predicates]) => `  - ${category}: ${predicates.join(', ')}`)
-    .join('\n');
+const generateRelationshipPrompt = (documentText: string, schema: Schema, entities: ExtractedEntity[]): string => {
+  const predicateReference = generatePredicateReference(schema);
+  const typedEntitiesString = entities.map(e => `- "${e.name}" (type: ${e.type})`).join('\n');
 
   return `
-    You are an expert AI assistant specializing in geological knowledge extraction.
-    Your task is to extract information as Subject-Predicate-Object triples based on the provided text.
-    You MUST ONLY use the entities from the "Entity List" for the subjects and objects of your triples.
-    You MUST strictly adhere to the provided schema of predicates.
+    You are an expert AI assistant specializing in geological knowledge extraction with a strict adherence to a provided ontology.
+    Your task is to extract information as Subject-Predicate-Object triples based on the provided text and a list of typed entities.
 
-    CRITICAL RULE: The 'subject' and 'object' must be nouns or complete noun phrases that represent distinct geological entities. Do NOT extract adjectives, verbs, or adverbs as entities.
-    For example, from the phrase 'The formation contains igneous and sedimentary rocks', a bad triple would be \`(Sedimentary, hasProperty, Igneous)\`. A good triple would be \`(Rock, hasProperty, Sedimentary)\` if 'Sedimentary' is treated as a property, or better, \`(Formation, contains, Igneous Rock)\`. Focus on extracting the full, meaningful noun phrase.
+    **CRITICAL INSTRUCTIONS:**
+    1.  **USE ONLY PROVIDED ENTITIES**: You MUST ONLY use the entities from the "Typed Entity List" for the subjects and objects of your triples. Do not invent new entities.
+    2.  **STRICTLY ADHERE TO ONTOLOGY**: For each triple you generate, you MUST consult the "Predicate Reference Guide". The type of your chosen subject MUST be present in the predicate's "Domain" list, and the type of your chosen object MUST be present in the predicate's "Range" list.
+    3.  **NO DOMAIN/RANGE VIOLATIONS**: If a relationship seems plausible but violates the domain/range constraints for a predicate, DO NOT extract it. Adherence to the schema is more important than capturing every possible relationship.
+    4.  **EVIDENCE IS MANDATORY**: Every triple must be supported by a direct quote from the text, which you will provide in the "evidenceText" field.
 
-    Entity List:
-    [${entities.map(e => `"${e}"`).join(', ')}]
+    **Typed Entity List:**
+    ${typedEntitiesString}
 
-    Predicate Schema:
-    ${predicateSummary}
+    **Predicate Reference Guide:**
+    ${predicateReference}
 
-    Output Format:
+    **Output Format:**
     Your output MUST be a single, valid JSON object containing a single top-level key "triples".
     - The value of "triples" must be an array of triple objects.
-    - Each triple object must have four keys: "subject" (string), "predicate" (string), "object" (string), and "evidenceText" (a direct quote from the source document).
-    - CRITICAL: Ensure all string values within the JSON, especially 'evidenceText', are properly escaped (e.g., \\" for double quotes).
+    - Each triple object must have "subject", "predicate", "object", "evidenceText", a "confidence" score (0.0-1.0), and a brief "justification" for why the triple is valid according to the text and the ontology.
+    - Ensure all string values are properly escaped.
     
-    Now, process the following document text and extract the triples:
+    Now, process the following document text and extract the triples, following all instructions precisely.
 
     --- DOCUMENT START ---
     ${documentText}
@@ -186,7 +203,7 @@ export const extractRelationships = async (
     apiKey: string,
     documentText: string,
     schema: Schema,
-    entities: string[],
+    entities: ExtractedEntity[],
     modelName: string,
     abortSignal: AbortSignal
 ): Promise<Omit<Triple, 'source'>[]> => {
@@ -218,9 +235,11 @@ export const extractRelationships = async (
                                     subject: { type: Type.STRING },
                                     predicate: { type: Type.STRING },
                                     object: { type: Type.STRING },
-                                    evidenceText: { type: Type.STRING }
+                                    evidenceText: { type: Type.STRING },
+                                    confidence: { type: Type.NUMBER },
+                                    justification: { type: Type.STRING }
                                 },
-                                required: ["subject", "predicate", "object", "evidenceText"]
+                                required: ["subject", "predicate", "object", "evidenceText", "confidence", "justification"]
                             }
                         }
                     },
@@ -252,18 +271,19 @@ export const extractRelationships = async (
 
 // --- Step 3: Relationship Suggestion ---
 
-const generateRelationshipSuggestionPrompt = (documentText: string, schema: Schema, entities: string[]): string => {
-  const existingPredicates = Object.values(schema.predicates.predicateCategories).flat().join(', ');
+const generateRelationshipSuggestionPrompt = (documentText: string, schema: Schema, entities: ExtractedEntity[]): string => {
+  const existingPredicates = Object.keys(schema.predicates.definitions).join(', ');
+  const typedEntitiesString = entities.map(e => `- "${e.name}" (type: ${e.type})`).join('\n');
 
   return `
-    You are a knowledge graph expert. Your task is to analyze the provided text for meaningful relationships between the given entities that are NOT captured by the existing predicate schema.
+    You are a knowledge graph ontologist. Your task is to analyze the provided text for meaningful relationships between the given typed entities that are NOT captured by the existing predicate schema.
     Suggest new, general-purpose predicates that could be added to the schema.
 
     Existing Predicates (DO NOT suggest these):
     [${existingPredicates}]
 
-    Entity List:
-    [${entities.map(e => `"${e}"`).join(', ')}]
+    Typed Entity List:
+    ${typedEntitiesString}
 
     Output Format:
     Your output MUST be a single, valid JSON object with a top-level key "suggestions".
@@ -284,7 +304,7 @@ export const suggestRelationships = async (
     apiKey: string,
     documentText: string,
     schema: Schema,
-    entities: string[],
+    entities: ExtractedEntity[],
     modelName: string,
     abortSignal: AbortSignal
 ): Promise<SchemaSuggestion[]> => {
@@ -354,29 +374,25 @@ export const suggestRelationships = async (
 // --- NEW: Turbo Mode Extraction ---
 
 const generateTurboPrompt = (documentText: string, schema: Schema): string => {
-  const schemaSummary = getVisibleSchema(schema);
-  const predicateSummary = Object.entries(schema.predicates.predicateCategories)
-    .map(([category, predicates]) => `  - ${category}: ${predicates.join(', ')}`)
-    .join('\n');
+  const allConcepts = getAllConcepts(schema);
+  const predicateReference = generatePredicateReference(schema);
   
   return `
-    You are a highly efficient knowledge extraction engine. Your task is to perform a two-step process in a single pass:
-    1.  **Entity Identification**: First, read the entire document text and identify all specific *instances* of concepts defined in the provided schema (e.g., 'Lingshui Formation' for the concept 'Formation'). All entities MUST be nouns or noun phrases.
-    2.  **Triple Extraction**: Second, using ONLY the entities you just identified and the predicates from the schema, extract all possible Subject-Predicate-Object triples.
+    You are a highly efficient knowledge extraction engine with a strict adherence to a provided ontology. Your task is to perform a two-step process in a single pass:
+    1.  **Entity Identification & Typing**: First, read the entire document text and identify all specific *instances* of concepts. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types". All entities MUST be nouns or noun phrases.
+    2.  **Triple Extraction with Schema Enforcement**: Second, using ONLY the typed entities you just identified and the predicates from the "Predicate Reference Guide", extract all possible Subject-Predicate-Object triples. The type of your chosen subject MUST be in the predicate's "Domain" list, and the type of your chosen object MUST be in the predicate's "Range" list.
 
-    Schema of Concepts to look for:
-    ${schemaSummary}
+    Valid Entity Types:
+    [${allConcepts.join(', ')}]
 
-    Predicate Schema:
-    ${predicateSummary}
+    Predicate Reference Guide:
+    ${predicateReference}
 
     Output Format:
     Your output MUST be a single, valid JSON object.
-    - Do NOT wrap the output in a markdown block (e.g., \`\`\`json).
     - The JSON object must have two top-level keys: "entities" and "triples".
-    - The value of "entities" must be an array of unique entity name strings you identified.
-    - The value of "triples" must be an array of triple objects.
-    - Each triple object must have four keys: "subject" (string), "predicate" (string), "object" (string), and "evidenceText" (a direct quote from the source document).
+    - Each entity object in the "entities" array must have a 'name', 'type', 'confidence' score (0.0-1.0), and a brief 'justification'.
+    - Each triple object in the "triples" array must have "subject", "predicate", "object", "evidenceText" (a direct quote), "confidence" score (0.0-1.0), and a brief "justification".
     - Ensure all string values within the JSON are properly escaped.
 
     Now, process the following document text and generate the complete JSON output:
@@ -416,7 +432,19 @@ export const extractInTurboMode = async (
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        entities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        entities: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    name: { type: Type.STRING },
+                                    type: { type: Type.STRING },
+                                    confidence: { type: Type.NUMBER },
+                                    justification: { type: Type.STRING }
+                                },
+                                required: ["name", "type", "confidence", "justification"]
+                            }
+                        },
                         triples: {
                             type: Type.ARRAY,
                             items: {
@@ -425,9 +453,11 @@ export const extractInTurboMode = async (
                                     subject: { type: Type.STRING },
                                     predicate: { type: Type.STRING },
                                     object: { type: Type.STRING },
-                                    evidenceText: { type: Type.STRING }
+                                    evidenceText: { type: Type.STRING },
+                                    confidence: { type: Type.NUMBER },
+                                    justification: { type: Type.STRING }
                                 },
-                                required: ["subject", "predicate", "object", "evidenceText"]
+                                required: ["subject", "predicate", "object", "evidenceText", "confidence", "justification"]
                             }
                         }
                     },
