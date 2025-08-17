@@ -66,8 +66,8 @@ const App: React.FC = () => {
   const [activeSchema, setActiveSchema] = useState<Schema>(schema);
   
   const [llmConfig, setLlmConfig] = useState<LlmConfig>(() => {
-    try { const saved = localStorage.getItem('llmConfig'); return saved ? JSON.parse(saved) : { apiKey: process.env.API_KEY || '', model: 'gemini-2.5-flash', temperature: 0.2 }; }
-    catch(e) { return { apiKey: process.env.API_KEY || '', model: 'gemini-2.5-flash', temperature: 0.2 }; }
+    try { const saved = localStorage.getItem('llmConfig'); return saved ? JSON.parse(saved) : { apiKey: process.env.API_KEY || '', provider: 'gemini', model: 'gemini-2.5-flash', temperature: 0.2 }; }
+    catch(e) { return { apiKey: process.env.API_KEY || '', provider: 'gemini', model: 'gemini-2.5-flash', temperature: 0.2 }; }
   });
 
   const [prompts, setPrompts] = useState<PromptCollection>(() => {
@@ -134,7 +134,7 @@ const App: React.FC = () => {
 
   const handleStartExtraction = async () => {
     if (!llmConfig.apiKey) { 
-        setError('Gemini API key is not configured. Please set it in Settings.');
+        setError('API key is not configured. Please set it in Settings.');
         setIsSettingsOpen(true);
         return;
     }
@@ -165,7 +165,6 @@ const App: React.FC = () => {
             
             setManagedFiles(prev => prev.map(f => f.name === file.name ? { ...f, rawText, chunks } : f));
         }));
-        if (abortControllerRef.current?.signal.aborted) throw new Error("Operation aborted by user.");
         
         // Step 2: Analyze schema fit on the first file (sequential is fine)
         const firstFile = managedFiles.find(f => selectedFiles.has(f.name));
@@ -182,7 +181,6 @@ const App: React.FC = () => {
             setFitReport(report);
             mode = report.decision;
         }
-        if (abortControllerRef.current?.signal.aborted) throw new Error("Operation aborted by user.");
 
         // Step 3: Extract entities from all files in parallel
         const entityExtractionStart = Date.now();
@@ -198,7 +196,6 @@ const App: React.FC = () => {
             };
             return extractEntities(text, schema, mode, paperCore, llmConfig, entityPrompts, abortControllerRef.current!.signal);
         }));
-        if (abortControllerRef.current?.signal.aborted) throw new Error("Operation aborted by user.");
 
         let allEntities: ExtractedEntity[] = [];
         entityExtractionResults.forEach(result => {
@@ -222,7 +219,6 @@ const App: React.FC = () => {
              updateFileStatus(file.name, { step: 'complete' });
              return { file, ...result };
         }));
-        if (abortControllerRef.current?.signal.aborted) throw new Error("Operation aborted by user.");
 
         let allTriples: Triple[] = [];
         relationshipExtractionResults.forEach(result => {
@@ -238,8 +234,19 @@ const App: React.FC = () => {
         setProcessingStats({ filesProcessed: filesToProcess.length, entitiesFound: allEntities.length, triplesExtracted: allTriples.length, totalDurationSeconds, entityExtractionDuration, relationshipExtractionDuration: totalDurationSeconds - (entityExtractionDuration || 0), entityTypeCounts, predicateTypeCounts });
 
     } catch (e: any) {
-        setError(`Extraction failed: ${e.message}`);
-        filesToProcess.forEach(f => updateFileStatus(f.name, { step: 'error', message: e.message }));
+        const filesToProcess = managedFiles.filter(f => selectedFiles.has(f.name));
+        if (e.name === 'AbortError') {
+            setError(null); // Clear error on user-initiated stop
+            setManagedFiles(prev => prev.map(f => {
+                if (['queued', 'parsing', 'structuring', 'analyzingSchemaFit', 'extractingEntities', 'extractingRelationships'].includes(f.status.step)) {
+                    return { ...f, status: { step: 'ready', message: 'Cancelled by user' } };
+                }
+                return f;
+            }));
+        } else {
+            setError(`Extraction failed: ${e.message}`);
+            filesToProcess.forEach(f => updateFileStatus(f.name, { step: 'error', message: e.message }));
+        }
     }
   };
   
@@ -277,6 +284,7 @@ const App: React.FC = () => {
   const handleSectionSelectionChange = (fileName: string, chunkId: string, selected: boolean) => { setManagedFiles(prev => prev.map(file => { if (file.name === fileName && file.chunks) { const newChunks = file.chunks.map(c => c.id === chunkId ? { ...c, selected } : c); return { ...file, chunks: newChunks }; } return file; })); };
   const handleDeleteFile = (fileName: string) => { setManagedFiles(prev => prev.filter(f => f.name !== fileName)); setSelectedFiles(prev => { const newSet = new Set(prev); newSet.delete(fileName); return newSet; }); };
   const handleSchemaReset = () => { if (window.confirm("Are you sure you want to reset the schema to its default state? This will clear any unsaved changes.")) { setSchema(DEFAULT_SCHEMA); } };
+  const handlePromptsReset = () => { if (window.confirm("Are you sure you want to reset ALL prompts to their default state? Your customizations will be lost.")) { setPrompts(DEFAULT_PROMPTS); } };
 
   const ViewSwitcher = () => (
     <div className="flex items-center p-1 bg-gray-200 rounded-lg">
@@ -320,7 +328,7 @@ const App: React.FC = () => {
                   <AlertTriangleIcon className="w-5 h-5 mt-0.5 flex-shrink-0"/>
                   <div>
                       <h3 className="font-bold">API Key Missing</h3>
-                      <p className="text-sm">Please set your Gemini API key in the <button onClick={() => setIsSettingsOpen(true)} className="underline font-semibold">Settings</button> menu to begin extraction.</p>
+                      <p className="text-sm">Please set your API key in the <button onClick={() => setIsSettingsOpen(true)} className="underline font-semibold">Settings</button> menu to begin extraction.</p>
                   </div>
               </div>
           )}
@@ -382,7 +390,7 @@ const App: React.FC = () => {
                     <SchemaViewer schema={schema} onSchemaChange={setSchema} onSchemaReset={handleSchemaReset} />
                 )}
                  {activeView === View.Prompts && (
-                    <PromptManager prompts={prompts} onPromptsChange={setPrompts} />
+                    <PromptManager prompts={prompts} onPromptsChange={setPrompts} onResetAll={handlePromptsReset} />
                 )}
                 {activeView === View.Extractor && (
                     <div className="h-full flex flex-col">

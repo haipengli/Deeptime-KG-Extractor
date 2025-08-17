@@ -1,6 +1,6 @@
 
 
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentParameters, GenerateContentResponse } from "@google/genai";
 import type { DocumentChunk, LlmConfig } from '../types';
 
 export interface DocumentStructure {
@@ -22,6 +22,34 @@ const getGeminiClient = (apiKey: string) => {
     return new GoogleGenAI({ apiKey });
 }
 
+// Helper to make generateContent abortable, as the SDK doesn't support it natively.
+const generateContentWithAbort = async (
+    ai: GoogleGenAI,
+    params: GenerateContentParameters,
+    signal: AbortSignal
+): Promise<GenerateContentResponse> => {
+    if (signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+    }
+    // Race the API call with a promise that rejects on abort.
+    return new Promise(async (resolve, reject) => {
+        const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            reject(new DOMException('Aborted', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+
+        try {
+            const result = await ai.models.generateContent(params);
+            signal.removeEventListener('abort', onAbort);
+            resolve(result);
+        } catch (error) {
+            signal.removeEventListener('abort', onAbort);
+            reject(error);
+        }
+    });
+};
+
 const fillTemplate = (template: string, data: Record<string, any>): string => {
     return template.replace(/\{\{(\w+)\}\}/g, (_, key) => data[key] || '');
 };
@@ -32,11 +60,14 @@ export const llmChunkDocument = async (
     promptTemplate: string,
     abortSignal: AbortSignal
 ): Promise<DocumentChunk[]> => {
+    if (llmConfig.provider !== 'gemini') {
+        throw new Error(`Provider "${llmConfig.provider}" is not yet supported.`);
+    }
     const ai = getGeminiClient(llmConfig.apiKey);
     const prompt = fillTemplate(promptTemplate, { rawText: rawText.slice(0, 30000) });
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await generateContentWithAbort(ai, {
             model: llmConfig.model,
             contents: prompt,
             config: {
@@ -77,8 +108,7 @@ export const llmChunkDocument = async (
                     required: ["outline", "chunks"]
                 }
             }
-        });
-        if (abortSignal.aborted) throw new Error("Aborted");
+        }, abortSignal);
         
         const structure = JSON.parse(response.text) as DocumentStructure;
         
@@ -89,8 +119,8 @@ export const llmChunkDocument = async (
         }));
         
     } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') throw e;
         if (e instanceof Error) {
-            if (e.message === "Aborted") console.log("Document structuring aborted.");
             if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
                 throw new Error("429 - Rate limit exceeded during structuring.");
             }

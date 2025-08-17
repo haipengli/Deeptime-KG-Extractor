@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentParameters, GenerateContentResponse } from "@google/genai";
 import type { Triple, Schema, ExtractedEntity, PaperCore, SchemaCapabilityProfile, FitReport, Predicate, SchemaProposal, LlmConfig } from '../types';
 import { preprocessText, Candidate } from './stratigraphyPreprocess';
 
@@ -11,6 +11,35 @@ const getGeminiClient = (apiKey: string) => {
     }
     return new GoogleGenAI({ apiKey });
 }
+
+// Helper to make generateContent abortable, as the SDK doesn't support it natively.
+const generateContentWithAbort = async (
+    ai: GoogleGenAI,
+    params: GenerateContentParameters,
+    signal: AbortSignal
+): Promise<GenerateContentResponse> => {
+    if (signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+    }
+    // Race the API call with a promise that rejects on abort.
+    return new Promise(async (resolve, reject) => {
+        const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            reject(new DOMException('Aborted', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+
+        try {
+            const result = await ai.models.generateContent(params);
+            signal.removeEventListener('abort', onAbort);
+            resolve(result);
+        } catch (error) {
+            signal.removeEventListener('abort', onAbort);
+            reject(error);
+        }
+    });
+};
+
 
 // --- Utility Functions ---
 
@@ -72,11 +101,14 @@ export const extractPaperCore = async (
     promptTemplate: string,
     abortSignal: AbortSignal
 ): Promise<PaperCore> => {
+    if (llmConfig.provider !== 'gemini') {
+        throw new Error(`Provider "${llmConfig.provider}" is not yet supported.`);
+    }
     const ai = getGeminiClient(llmConfig.apiKey);
     const prompt = fillTemplate(promptTemplate, { abstractText });
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await generateContentWithAbort(ai, {
             model: llmConfig.model, contents: prompt,
             config: {
                 temperature: llmConfig.temperature, responseMimeType: "application/json",
@@ -90,10 +122,10 @@ export const extractPaperCore = async (
                     required: ["questions", "data_used", "study_area", "time_interval", "methods", "key_results", "evidence_spans"]
                 }
             }
-        });
-        if (abortSignal.aborted) throw new Error("Aborted");
+        }, abortSignal);
         return JSON.parse(response.text) as PaperCore;
     } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') throw e;
         if (e instanceof Error) { if (e.message.includes('429')) { throw new Error("429 - Rate limit exceeded."); } throw e; } 
         else { throw new Error("An unknown error occurred during PaperCore extraction."); }
     }
@@ -142,6 +174,9 @@ export const generateFitReport = (core: PaperCore, schema: SchemaCapabilityProfi
 export const extractEntities = async (
     documentText: string, schema: Schema, extractionMode: ExtractionMode, paperCore: PaperCore | null, llmConfig: LlmConfig, promptTemplates: { schema: string, automated: string }, abortSignal: AbortSignal
 ): Promise<{ entities: Omit<ExtractedEntity, 'selected'>[], proposals: SchemaProposal[] }> => {
+    if (llmConfig.provider !== 'gemini') {
+        throw new Error(`Provider "${llmConfig.provider}" is not yet supported.`);
+    }
     const guidance = summarizePaperCoreForGuidance(paperCore);
     const { cleanText, candidates } = preprocessText(documentText);
     const ai = getGeminiClient(llmConfig.apiKey);
@@ -153,7 +188,7 @@ export const extractEntities = async (
                 schema_concepts: getAllConcepts(schema).join(', '),
                 text: cleanText,
             });
-            const response = await ai.models.generateContent({
+            const response = await generateContentWithAbort(ai, {
                 model: llmConfig.model, contents: prompt,
                 config: {
                     temperature: llmConfig.temperature, responseMimeType: "application/json",
@@ -164,8 +199,7 @@ export const extractEntities = async (
                         }, required: ["entities", "new_types"]
                     }
                 }
-            });
-            if (abortSignal.aborted) throw new Error("Aborted");
+            }, abortSignal);
             const result = JSON.parse(response.text);
             const proposal: SchemaProposal | null = result.new_types.length > 0 ? { id: `prop-${Date.now()}`, baseVersion: schema.meta.version, new_types: result.new_types, new_predicates: [], evidence: { paperId: 'current', quotes: [] } } : null;
             return { entities: result.entities || [], proposals: proposal ? [proposal] : [] };
@@ -177,7 +211,7 @@ export const extractEntities = async (
             text: cleanText,
             candidate_hints: JSON.stringify(candidates.map(c => ({ name: c.name, type: c.type })), null, 2),
         });
-        const response = await ai.models.generateContent({ 
+        const response = await generateContentWithAbort(ai, { 
             model: llmConfig.model, 
             contents: prompt, 
             config: { 
@@ -197,13 +231,13 @@ export const extractEntities = async (
                     } 
                 } 
             } 
-        });
-        if (abortSignal.aborted) throw new Error("Aborted");
+        }, abortSignal);
         const entities = JSON.parse(response.text);
 
         return { entities: entities, proposals: [] };
 
     } catch (e) {
+         if (e instanceof Error && e.name === 'AbortError') throw e;
          if (e instanceof Error) { if (e.message.includes('429')) throw new Error("429 - Rate limit exceeded."); throw e; } 
          else { throw new Error("An unknown error occurred during entity extraction."); }
     }
@@ -212,6 +246,9 @@ export const extractEntities = async (
 export const extractRelationships = async (
     documentText: string, schema: Schema, entities: ExtractedEntity[], extractionMode: ExtractionMode, paperCore: PaperCore | null, llmConfig: LlmConfig, promptTemplates: { schema: string, automated: string }, abortSignal: AbortSignal
 ): Promise<{triples: Omit<Triple, 'source'>[], proposals: SchemaProposal[]}> => {
+    if (llmConfig.provider !== 'gemini') {
+        throw new Error(`Provider "${llmConfig.provider}" is not yet supported.`);
+    }
     const guidance = summarizePaperCoreForGuidance(paperCore);
     const { cleanText } = preprocessText(documentText);
     const ai = getGeminiClient(llmConfig.apiKey);
@@ -226,7 +263,7 @@ export const extractRelationships = async (
                 predicate_reference: predicateReference,
                 text: cleanText,
             });
-            const response = await ai.models.generateContent({
+            const response = await generateContentWithAbort(ai, {
                 model: llmConfig.model, contents: prompt,
                 config: {
                     temperature: llmConfig.temperature, responseMimeType: "application/json",
@@ -237,8 +274,7 @@ export const extractRelationships = async (
                         }, required: ["triples", "new_predicates"]
                     }
                 }
-            });
-            if (abortSignal.aborted) throw new Error("Aborted");
+            }, abortSignal);
             const result = JSON.parse(response.text);
             const proposal: SchemaProposal | null = result.new_predicates.length > 0 ? { id: `prop-${Date.now()}`, baseVersion: schema.meta.version, new_types: [], new_predicates: result.new_predicates, evidence: { paperId: 'current', quotes: result.new_predicates.map((p: any) => p.example.evidenceText) } } : null;
             return { triples: result.triples || [], proposals: proposal ? [proposal] : [] };
@@ -250,7 +286,7 @@ export const extractRelationships = async (
             predicate_reference: predicateReference,
             document: cleanText,
         });
-        const response = await ai.models.generateContent({
+        const response = await generateContentWithAbort(ai, {
             model: llmConfig.model, contents: prompt,
             config: {
                 temperature: llmConfig.temperature, responseMimeType: "application/json",
@@ -258,13 +294,13 @@ export const extractRelationships = async (
                     type: Type.OBJECT, properties: { triples: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { subject: { type: Type.STRING }, predicate: { type: Type.STRING }, object: { type: Type.STRING }, evidenceText: { type: Type.STRING }, confidence: { type: Type.NUMBER }, justification: { type: Type.STRING } }, required: ["subject", "predicate", "object", "evidenceText", "confidence", "justification"] } } }, required: ["triples"]
                 }
             }
-        });
+        }, abortSignal);
 
-        if (abortSignal.aborted) throw new Error("Aborted");
         const result = JSON.parse(response.text);
         return { triples: result.triples || [], proposals: [] };
 
     } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') throw e;
         if (e instanceof Error) { if (e.message.includes('429')) throw new Error("429 - Rate limit exceeded."); throw e; } 
         else { throw new Error("An unknown error occurred during relationship extraction."); }
     }

@@ -5,6 +5,7 @@ import { ChevronDownIcon, SaveIcon, ResetIcon, InfoIcon } from './icons';
 interface PromptManagerProps {
     prompts: PromptCollection;
     onPromptsChange: (newPrompts: PromptCollection) => void;
+    onResetAll: () => void;
 }
 
 const PromptEditor: React.FC<{ prompt: Prompt; onSave: (newTemplate: string) => void; onVersionChange: (version: number) => void }> = ({ prompt, onSave, onVersionChange }) => {
@@ -68,7 +69,7 @@ const PromptEditor: React.FC<{ prompt: Prompt; onSave: (newTemplate: string) => 
     );
 };
 
-const PromptManager: React.FC<PromptManagerProps> = ({ prompts, onPromptsChange }) => {
+const PromptManager: React.FC<PromptManagerProps> = ({ prompts, onPromptsChange, onResetAll }) => {
     const [expandedPrompts, setExpandedPrompts] = useState<Record<string, boolean>>({});
 
     const togglePrompt = (key: string) => {
@@ -95,8 +96,20 @@ const PromptManager: React.FC<PromptManagerProps> = ({ prompts, onPromptsChange 
 
     return (
         <div className="bg-white p-6 rounded-lg shadow-lg border border-gray-200">
-            <h2 className="text-2xl font-bold text-brand-dark mb-1">Prompt Manager</h2>
-            <p className="text-sm text-gray-600 mb-4">View and customize the prompts used by the AI. Changes are saved locally to your browser.</p>
+            <div className="flex justify-between items-center mb-4">
+                <div>
+                    <h2 className="text-2xl font-bold text-brand-dark mb-1">Prompt Manager</h2>
+                    <p className="text-sm text-gray-600">View and customize the prompts used by the AI. Changes are saved locally to your browser.</p>
+                </div>
+                <button
+                    onClick={onResetAll}
+                    className="flex items-center space-x-2 text-sm text-red-600 hover:text-red-800 font-semibold py-1 px-3 rounded-md hover:bg-red-50 border border-red-200 transition-colors"
+                    aria-label="Reset all prompts to default"
+                >
+                    <ResetIcon className="w-4 h-4"/>
+                    <span>Reset All to Default</span>
+                </button>
+            </div>
             <div className="space-y-3 max-h-[calc(100vh-280px)] overflow-y-auto pr-2">
                 {Object.entries(prompts).map(([key, prompt]) => (
                     <div key={key} className="border rounded-md overflow-hidden">

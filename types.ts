@@ -146,7 +146,8 @@ export interface SchemaProposal {
 
 export interface LlmConfig {
   apiKey: string;
-  model: 'gemini-2.5-flash';
+  provider: LLMProvider;
+  model: string;
   temperature: number;
 }
 
