@@ -1,6 +1,9 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
-import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput, ExtractedEntity } from '../types';
+import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput, ExtractedEntity, PaperCore, SchemaCapabilityProfile, FitReport, Predicate } from '../types';
 import { preprocessText, Candidate } from './stratigraphyPreprocess';
+
+type ExtractionMode = 'schema_mode' | 'automated_mode';
 
 // --- Utility Functions ---
 
@@ -24,14 +27,37 @@ const flattenConcepts = (concepts: any): string[] => {
   return [];
 };
 
+const getBiologicalConcepts = (schema: Schema): string[] => {
+    return flattenConcepts(schema.interpretiveAxis.Biostratigraphy.concepts);
+}
+
+const getGeologicalConcepts = (schema: Schema): string[] => {
+    const observable = [
+        ...flattenConcepts(schema.observableAxis.Time.concepts),
+        ...flattenConcepts(schema.observableAxis.Space.concepts),
+        ...flattenConcepts(schema.observableAxis.GeologicObject.concepts),
+        ...flattenConcepts(schema.observableAxis.GeologicUnit.concepts),
+        ...flattenConcepts(schema.observableAxis.GeologicFeatureMorphologic.concepts),
+    ];
+    const interpretive = [
+        ...flattenConcepts(schema.interpretiveAxis.Realm.concepts),
+        ...flattenConcepts(schema.interpretiveAxis.EnvironmentsSystems.concepts),
+        ...flattenConcepts(schema.interpretiveAxis.RockOrigin.concepts),
+        ...flattenConcepts(schema.interpretiveAxis.SurfacesInterpretive.concepts),
+        ...flattenConcepts(schema.interpretiveAxis.Events.concepts),
+    ];
+    const bioConcepts = getBiologicalConcepts(schema);
+    const all = [...new Set([...observable, ...interpretive])];
+    // Filter out bio concepts to get purely geological ones
+    return all.filter(c => !bioConcepts.includes(c));
+}
+
 const getAllConcepts = (schema: Schema): string[] => {
-    const observable = Object.values(schema.observableAxis).flatMap(c => flattenConcepts(c.concepts));
-    const interpretive = Object.values(schema.interpretiveAxis).flatMap(c => flattenConcepts(c.concepts));
-    return [...new Set([...observable, ...interpretive])];
+    return [...new Set([...getGeologicalConcepts(schema), ...getBiologicalConcepts(schema)])];
 };
 
 
-const generatePredicateReference = (definitions: Record<string, any>): string => {
+const generatePredicateReference = (definitions: Record<string, Predicate>): string => {
     return Object.entries(definitions)
         .map(([name, def]) => {
             return `
@@ -43,35 +69,174 @@ const generatePredicateReference = (definitions: Record<string, any>): string =>
         }).join('');
 };
 
-// --- Multi-pass Entity Extraction ---
+// --- Pre-flight Analysis Pipeline ---
 
-const generateStratigraphyEntityPrompt = (cleanText: string, candidates: Candidate[]): string => {
+const generatePaperCorePrompt = (abstractText: string): string => `
+You are an expert academic researcher specializing in deeptime research, especially paleogeography, geology and paleontology. 
+Your task is to meticulously analyze the provided research paper ABSTRACT and distill its core scientific contribution.. From the ABSTRACT only, extract the paper's core:
+- questions (what is being asked),
+- data_used (what evidence is analyzed),
+- study_area (formations, members, basins, localities),
+- time_interval (geologic time terms),
+- methods,
+- key_results (1–3 short bullet claims).
+Return STRICT JSON matching the PaperCore schema. No extra fields.
+Include short evidence quotes with page/offsets.
+
+ABSTRACT (preprocessed):
+${abstractText}
+SOURCE: page 1
+`;
+
+export const extractPaperCore = async (
+    provider: LLMProvider,
+    apiKey: string,
+    abstractText: string,
+    modelName: string,
+    abortSignal: AbortSignal
+): Promise<PaperCore> => {
+    if (provider !== 'gemini' || !apiKey) {
+        throw new Error('Only Gemini provider is supported for this operation.');
+    }
+    const ai = new GoogleGenAI({ apiKey });
+    const prompt = generatePaperCorePrompt(abstractText);
+
+    try {
+        const response = await ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+            config: {
+                temperature: 0,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        questions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        data_used: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    name: { type: Type.STRING },
+                                    role: { type: Type.STRING },
+                                    type_hint: { type: Type.STRING }
+                                },
+                                required: ["name", "role", "type_hint"]
+                            }
+                        },
+                        study_area: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        time_interval: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        methods: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        key_results: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        evidence_spans: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    quote: { type: Type.STRING },
+                                    page: { type: Type.NUMBER, nullable: true },
+                                    offset: { type: Type.ARRAY, items: { type: Type.NUMBER }, nullable: true }
+                                },
+                                required: ["quote", "page", "offset"]
+                            }
+                        }
+                    },
+                    required: ["questions", "data_used", "study_area", "time_interval", "methods", "key_results", "evidence_spans"]
+                }
+            }
+        });
+        if (abortSignal.aborted) throw new Error("Aborted");
+        return JSON.parse(response.text) as PaperCore;
+    } catch (e) {
+        if (e instanceof Error) {
+            if (e.message === "Aborted") console.log("PaperCore extraction intentionally aborted.");
+            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
+                throw new Error("429 - Rate limit exceeded.");
+            }
+            throw e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e;
+        } else {
+            throw new Error("An unknown error occurred during PaperCore extraction.");
+        }
+    }
+};
+
+export const generateSchemaCapabilityProfile = (schema: Schema): SchemaCapabilityProfile => {
+    return {
+        entity_types: getAllConcepts(schema),
+        predicates: Object.keys(schema.predicates.definitions),
+        type_rules: Object.entries(schema.predicates.definitions).reduce((acc, [pred, def]) => {
+            acc[pred] = { domain: def.domain, range: def.range };
+            return acc;
+        }, {} as Record<string, { domain: string[], range: string[] }>)
+    };
+};
+
+const mapToSchema = (item: string, schema: SchemaCapabilityProfile): string | undefined => {
+  const norm = item.toLowerCase();
+  const entityMap = new Map([
+    ['formation','Formation'], ['member','Member'], ['group','Group'],
+    ['locality','Locality'], ['basin','Basin'], ['aptian','ChronostratigraphicUnit'],
+    ['albian','ChronostratigraphicUnit'], ['mni','Measurement'] // Note: Measurement is not in schema yet
+  ]);
+  for (const [key, val] of entityMap) {
+      if (norm.includes(key)) {
+          if (schema.entity_types.includes(val)) return val;
+      }
+  }
+  return schema.entity_types.find(t => norm.includes(t.toLowerCase()));
+};
+
+export const generateFitReport = (core: PaperCore, schema: SchemaCapabilityProfile): FitReport => {
+  const items = [
+    ...core.study_area,
+    ...core.time_interval,
+    ...core.data_used.map(d => d.name),
+    'occurs in','part of','has age','located in' // expected relation cues
+  ];
+  const covered: FitReport['covered'] = [];
+  const uncovered: FitReport['uncovered'] = [];
+
+  for (const it of items) {
+    const mapped = mapToSchema(it, schema);
+    if (mapped) covered.push({ item: it, maps_to: mapped });
+    else uncovered.push({ item: it, reason: 'no mapping' });
+  }
+
+  const coverage = items.length > 0 ? covered.length / items.length : 1;
+
+  const hasScope =
+    covered.some(x => x.maps_to === 'Formation' || x.maps_to === 'Member' || x.maps_to === 'Locality') &&
+    (core.time_interval.length === 0 || covered.some(x => x.maps_to === 'ChronostratigraphicUnit'));
+
+  const decision = (coverage >= 0.70 && hasScope) ? 'schema_mode' : 'automated_mode';
+  return { 
+      covered, 
+      uncovered, 
+      coverage_score: Number(coverage.toFixed(2)), 
+      decision,
+      rationale: `Coverage is ${Math.round(coverage*100)}%. ${hasScope ? 'Critical scope elements are covered.' : 'Critical scope elements are missing.'}` 
+  };
+};
+
+// --- Multi-pass and Automated Entity Extraction ---
+
+const generateStratigraphyEntityPrompt = (cleanText: string, schema: Schema, candidates: Candidate[]): string => {
     const candidateHints = candidates.map(c => ({ name: c.name, type: c.type }));
+    const geologicalConcepts = getGeologicalConcepts(schema);
     return `
-You extract ONLY stratigraphy/locality/time entities from the provided text chunk.
-Allowed entity types (exact spelling):
-- Formation
-- Member
-- Group
-- Locality
-- ChronostratigraphicUnit
+You are an expert deeptime researcher. Your task is to extract geological, stratigraphic, and locational named entities from the provided text chunk.
+Focus on concepts related to geology, stratigraphy, structural geology (e.g., faults, folds), sedimentology (e.g., depositional environments), and paleogeography.
+
+Allowed entity types:
+[${geologicalConcepts.join(', ')}]
 
 Rules:
-- Expand abbreviations: Fm.->Formation, Mbr.->Member, Gp.->Group, Mtn./Mt.->Mountain.
-- Rejoined hyphenations like "Cedar Moun- / tain Formation" must be treated as "Cedar Mountain Formation".
-- Do NOT extract taxa or anatomical specimens here.
+- Extract from Allowed Types: You MUST first extract entities whose type is present in the "Allowed Entity Types" list.
+- Focus on Instances, Not Classes: Extract specific, named entities (e.g., "Morrison Formation", "San Juan Basin"). Do NOT extract general concepts (e.g., "formations", "basin").
 - Return STRICT JSON: an array of entities with the exact schema below. No prose.
 
 Entity schema (JSON):
-[
-  {
-    "name": "string",
-    "type": "Formation"|"Member"|"Group"|"Locality"|"ChronostratigraphicUnit",
-    "confidence": 0.9,
-    "justification": "string",
-    "evidenceText": "string"
-  }
-]
+[ { "name": "string", "type": "string", "confidence": 0.9, "justification": "string", "evidenceText": "string" } ]
 
 If nothing is present, return [].
 
@@ -84,30 +249,62 @@ ${JSON.stringify(candidateHints, null, 2)}
 };
 
 const generateAnatomyTaxaEntityPrompt = (cleanText: string, schema: Schema): string => {
-  const allConcepts = getAllConcepts(schema);
-
+  const biologicalConcepts = getBiologicalConcepts(schema);
   return `
-    You are an expert AI assistant specializing in geological and paleontological knowledge extraction. Your goal is to extract BIOLOGICAL entities and suggest NEW high-level concepts for the schema.
+You are an expert AI assistant specializing in paleontology. Your goal is to extract BIOLOGICAL entities.
+Focus on fossils, taxa, and biological specimens.
 
-    Your task is to identify and list all potential biological named entities and assign a type to each one.
-    You will perform two types of extraction simultaneously:
-    1.  **Existing Biological Entities**: Identify entities that are specific instances of biological concepts like 'Taxon' or 'Specimen'.
-    2.  **New Entity Suggestions**: Identify important, abstract, high-level domain-specific concepts that are NOT in the schema but should be.
+Valid Biological Entity Types:
+[${biologicalConcepts.join(', ')}]
 
-    Valid Biological Entity Types:
-    [Taxon, Specimen, IndexFossil, Biozone]
+Output Format:
+Your output MUST be a single, valid JSON object with a key 'entities'.
+- For each entity, provide a 'name', its assigned 'type' from the list above, a 'confidence' score (0.0 to 1.0), and a brief 'justification'.
 
-    Output Format:
-    Your output MUST be a single, valid JSON object conforming to the required schema. It should contain two keys: 'entities' (an array of entity objects) and 'suggestions' (an array of suggestion objects).
-    - For each entity, provide a 'name', its assigned 'type' from the list above, a 'confidence' score (0.0 to 1.0), and a brief 'justification'.
-    - 'justification' should explain why the text supports the extraction and typing.
+Now, process the following document text and extract all relevant biological entities.
 
-    Now, process the following document text and extract all relevant biological entities and suggestions.
-
-    --- DOCUMENT START ---
-    ${cleanText}
-    --- DOCUMENT END ---
+--- DOCUMENT START ---
+${cleanText}
+--- DOCUMENT END ---
   `;
+};
+
+const generateAutomatedEntityPrompt = (cleanText: string, schema: Schema): string => {
+    const allConcepts = getAllConcepts(schema);
+    return `
+You are an ontologist and knowledge engineer building a knowledge graph for deep-time research (geology, paleontology, structural geology, sedimentology). Your goal is to comprehensively extract ALL potential named entities (specific nouns and noun phrases) from the text.
+
+Extraction & Typing Process:
+1. Extract Comprehensively: Identify all specific nouns and noun phrases representing key concepts (formations, locations, fossils, measurements, events, etc.).
+2. Assign a Type: For each entity, you MUST assign a type by following these rules:
+    a. Prioritize Existing Types: First, try to assign a type from the "Existing Schema Types" list.
+    b. Propose New Types When Necessary: If no existing type is a good fit, propose a NEW, sensible, PascalCase type.
+3.  Principles for New Types:
+    - A new type must be a general category (e.g., 'TectonicEvent'), not the name of the instance itself.
+    - Good examples: 'DepositionalSequence', 'GeochemicalMarker', 'VolcanicAshBed'.
+    - Bad examples: 'TheGreatUnconformity', 'K-PgBoundaryEvent' (these are entity names, not types).
+
+CRITICAL: Extract comprehensively. Do not miss important geological formations, tectonic settings, depositional environments, structural features, locations, fossils, measurements, or processes.
+
+Existing Schema Types:
+[${allConcepts.join(', ')}]
+
+Return STRICT JSON: an array of entities with the schema below. No prose.
+
+Entity schema (JSON):
+[
+  {
+    "name": "string",
+    "type": "string",
+    "confidence": 0.9,
+    "justification": "string",
+    "evidenceText": "string"
+  }
+]
+
+TEXT:
+${cleanText}
+`;
 };
 
 
@@ -117,39 +314,48 @@ export const extractEntities = async (
     documentText: string,
     schema: Schema,
     modelName: string,
+    extractionMode: ExtractionMode,
     abortSignal: AbortSignal
 ): Promise<{ entities: Omit<ExtractedEntity, 'selected'>[], suggestions: SchemaSuggestion[] }> => {
-    if (provider !== 'gemini') {
-        throw new Error(`${provider} is not yet supported. Please select Google Gemini.`);
-    }
-    if (!apiKey) {
-        throw new Error('Gemini API key is missing.');
-    }
+    if (provider !== 'gemini' || !apiKey) throw new Error('Only Gemini provider is supported for this operation.');
 
     const { cleanText, candidates } = preprocessText(documentText);
     const ai = new GoogleGenAI({ apiKey });
 
     try {
+        if (extractionMode === 'automated_mode') {
+            const prompt = generateAutomatedEntityPrompt(cleanText, schema);
+            const response = await ai.models.generateContent({
+                model: modelName, contents: prompt,
+                config: {
+                    temperature: 0, responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.ARRAY, items: {
+                            type: Type.OBJECT, properties: {
+                                name: { type: Type.STRING }, type: { type: Type.STRING }, confidence: { type: Type.NUMBER },
+                                justification: { type: Type.STRING }, evidenceText: { type: Type.STRING },
+                            }, required: ["name", "type", "confidence", "justification", "evidenceText"]
+                        }
+                    }
+                }
+            });
+            if (abortSignal.aborted) throw new Error("Aborted");
+            return { entities: JSON.parse(response.text), suggestions: [] };
+        }
+
+        // --- Schema Mode ---
         // Pass 1: Stratigraphy
-        const stratPrompt = generateStratigraphyEntityPrompt(cleanText, candidates);
+        const stratPrompt = generateStratigraphyEntityPrompt(cleanText, schema, candidates);
         const stratResponse = await ai.models.generateContent({
-            model: modelName,
-            contents: stratPrompt,
+            model: modelName, contents: stratPrompt,
             config: {
-                temperature: 0,
-                responseMimeType: "application/json",
+                temperature: 0, responseMimeType: "application/json",
                 responseSchema: {
-                    type: Type.ARRAY,
-                    items: {
-                        type: Type.OBJECT,
-                        properties: {
-                            name: { type: Type.STRING },
-                            type: { type: Type.STRING },
-                            confidence: { type: Type.NUMBER },
-                            justification: { type: Type.STRING },
-                            evidenceText: { type: Type.STRING },
-                        },
-                        required: ["name", "type", "confidence", "justification", "evidenceText"]
+                    type: Type.ARRAY, items: {
+                        type: Type.OBJECT, properties: {
+                            name: { type: Type.STRING }, type: { type: Type.STRING }, confidence: { type: Type.NUMBER },
+                            justification: { type: Type.STRING }, evidenceText: { type: Type.STRING },
+                        }, required: ["name", "type", "confidence", "justification", "evidenceText"]
                     }
                 }
             }
@@ -157,66 +363,34 @@ export const extractEntities = async (
         if (abortSignal.aborted) throw new Error("Aborted");
         const stratEntities = JSON.parse(stratResponse.text);
 
-        // Pass 2: Anatomy, Taxa, and Suggestions
+        // Pass 2: Anatomy, Taxa
         const anatomyPrompt = generateAnatomyTaxaEntityPrompt(cleanText, schema);
         const anatomyResponse = await ai.models.generateContent({
-             model: modelName,
-            contents: anatomyPrompt,
-            config: {
-                temperature: 0,
-                responseMimeType: "application/json",
+             model: modelName, contents: anatomyPrompt,
+             config: {
+                temperature: 0, responseMimeType: "application/json",
                 responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
+                    type: Type.OBJECT, properties: {
                         entities: {
-                            type: Type.ARRAY,
-                            items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                    name: { type: Type.STRING },
-                                    type: { type: Type.STRING },
-                                    confidence: { type: Type.NUMBER },
-                                    justification: { type: Type.STRING }
-                                },
-                                required: ["name", "type", "confidence", "justification"]
-                            }
-                        },
-                        suggestions: {
-                            type: Type.ARRAY,
-                            items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                    name: { type: Type.STRING },
-                                    categorySuggestion: { type: Type.STRING },
-                                    justification: { type: Type.STRING }
-                                },
-                                required: ["name", "categorySuggestion", "justification"]
+                            type: Type.ARRAY, items: {
+                                type: Type.OBJECT, properties: {
+                                    name: { type: Type.STRING }, type: { type: Type.STRING }, confidence: { type: Type.NUMBER }, justification: { type: Type.STRING }
+                                }, required: ["name", "type", "confidence", "justification"]
                             }
                         }
-                    },
-                    required: ["entities", "suggestions"]
+                    }, required: ["entities"]
                 }
             }
         });
         if (abortSignal.aborted) throw new Error("Aborted");
         const anatomyResult = JSON.parse(anatomyResponse.text);
 
-        const allEntities = [...stratEntities, ...anatomyResult.entities];
-        const formattedSuggestions: SchemaSuggestion[] = anatomyResult.suggestions.map((s: any) => ({
-            type: 'entity',
-            name: s.name,
-            categorySuggestion: s.categorySuggestion,
-            justification: s.justification,
-        }));
-        
-        return { entities: allEntities, suggestions: formattedSuggestions };
+        return { entities: [...stratEntities, ...anatomyResult.entities], suggestions: [] };
 
     } catch (e) {
          if (e instanceof Error) {
             if (e.message === "Aborted") console.log("Entity extraction intentionally aborted.");
-            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
-                throw new Error("429 - Rate limit exceeded.");
-            }
+            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) throw new Error("429 - Rate limit exceeded.");
             throw e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e;
         } else {
             throw new Error("An unknown error occurred during entity extraction.");
@@ -231,33 +405,54 @@ const generateRelationshipPrompt = (documentText: string, schema: Schema, entiti
   const typedEntitiesString = entities.map(e => `- "${e.name}" (type: ${e.type})`).join('\n');
 
   return `
-    You are an expert AI assistant specializing in geological knowledge extraction with a strict adherence to a provided ontology.
-    Your task is to extract information as Subject-Predicate-Object triples based on the provided text and a list of typed entities.
+You are an expert AI assistant specializing in geological knowledge extraction with a strict adherence to a provided ontology.
+Your task is to extract information as Subject-Predicate-Object triples based on the provided text and a list of typed entities.
 
-    **CRITICAL INSTRUCTIONS:**
-    1.  **USE ONLY PROVIDED ENTITIES**: You MUST ONLY use the entities from the "Typed Entity List" for the subjects and objects of your triples. Do not invent new entities.
-    2.  **STRICTLY ADHERE TO ONTOLOGY**: For each triple you generate, you MUST consult the "Predicate Reference Guide". The type of your chosen subject MUST be present in the predicate's "Domain" list, and the type of your chosen object MUST be present in the predicate's "Range" list. If a domain or range is empty (i.e., 'Any'), it can match any entity type.
-    3.  **NO DOMAIN/RANGE VIOLATIONS**: If a relationship seems plausible but violates the domain/range constraints for a predicate, DO NOT extract it. Adherence to the schema is more important than capturing every possible relationship.
-    4.  **EVIDENCE IS MANDATORY**: Every triple must be supported by a direct quote from the text, which you will provide in the "evidenceText" field.
+**CRITICAL INSTRUCTIONS:**
+1.  **USE ONLY PROVIDED ENTITIES**: You MUST ONLY use the entities from the "Typed Entity List" for the subjects and objects of your triples.
+2.  **STRICTLY ADHERE TO ONTOLOGY**: For each triple, consult the "Predicate Reference Guide". The type of your subject MUST be in the predicate's "Domain" list, and the type of your object MUST be in the predicate's "Range" list. An empty domain/range means any type is allowed.
+3.  **NO DOMAIN/RANGE VIOLATIONS**: If a relationship seems plausible but violates the domain/range constraints, DO NOT extract it.
+4.  **EVIDENCE IS MANDATORY**: Every triple must be supported by a direct quote from the text.
 
-    **Typed Entity List:**
-    ${typedEntitiesString}
+**Typed Entity List:**
+${typedEntitiesString}
 
-    **Predicate Reference Guide:**
-    ${predicateReference}
+**Predicate Reference Guide:**
+${predicateReference}
 
-    **Output Format:**
-    Your output MUST be a single, valid JSON object containing a single top-level key "triples".
-    - The value of "triples" must be an array of triple objects.
-    - Each triple object must have "subject", "predicate", "object", "evidenceText", a "confidence" score (0.0-1.0), and a brief "justification" for why the triple is valid according to the text and the ontology.
-    - Ensure all string values are properly escaped.
-    
-    Now, process the following document text and extract the triples, following all instructions precisely.
+**Output Format:**
+Return a single JSON object with a "triples" key, containing an array of triple objects.
 
-    --- DOCUMENT START ---
-    ${documentText}
-    --- DOCUMENT END ---
+--- DOCUMENT START ---
+${documentText}
+--- DOCUMENT END ---
   `;
+};
+
+const generateAutomatedRelationshipPrompt = (cleanText: string, schema: Schema, entities: ExtractedEntity[]): string => {
+    const typedEntitiesString = entities.map(e => `- "${e.name}" (type: ${e.type})`).join('\n');
+    return `
+You are an expert AI assistant creating a knowledge graph for deeptime research. Your task is to extract meaningful relationships between the provided entities as Subject-Predicate-Object triples.
+CRITICAL INSTRUCTIONS:
+1. USE ONLY PROVIDED ENTITIES: You MUST ONLY use the entities from the "Typed Entity List" for subjects and objects.
+2. PREFER EXISTING PREDICATES: First, try to use a predicate from the "Existing Predicates" list.
+3. INVENT WHEN NECESSARY: If a clear, important relationship exists in the text that is NOT well-represented by the existing predicates, you MAY invent a new, concise, self-explanatory predicate in camelCase (e.g., 'hasDepositionalContext', 'indicatesTectonicEvent').
+4. EVIDENCE IS MANDATORY: Every triple must be supported by a direct quote.
+
+Typed Entity List:
+${typedEntitiesString}
+
+Existing Predicates Reference:
+${generatePredicateReference(schema.predicates.definitions)}
+
+Return STRICT JSON: an array of triples.
+
+Triple Schema (JSON):
+[ { "subject": "string", "predicate": "string", "object": "string", "evidenceText": "string", "confidence": 0.9, "justification": "string" } ]
+
+TEXT:
+${cleanText}
+`;
 };
 
 export const extractRelationships = async (
@@ -267,17 +462,16 @@ export const extractRelationships = async (
     schema: Schema,
     entities: ExtractedEntity[],
     modelName: string,
+    extractionMode: ExtractionMode,
     abortSignal: AbortSignal
 ): Promise<Omit<Triple, 'source'>[]> => {
-    if (provider !== 'gemini') {
-        throw new Error(`${provider} is not yet supported. Please select Google Gemini.`);
-    }
-     if (!apiKey) {
-        throw new Error('Gemini API key is missing.');
-    }
+    if (provider !== 'gemini' || !apiKey) throw new Error('Only Gemini provider is supported.');
     
     const { cleanText } = preprocessText(documentText);
-    const prompt = generateRelationshipPrompt(cleanText, schema, entities);
+    const prompt = extractionMode === 'automated_mode'
+        ? generateAutomatedRelationshipPrompt(cleanText, schema, entities)
+        : generateRelationshipPrompt(cleanText, schema, entities);
+    
     const ai = new GoogleGenAI({ apiKey });
 
      try {
@@ -311,9 +505,7 @@ export const extractRelationships = async (
             }
         });
 
-        if (abortSignal.aborted) {
-            throw new Error("Aborted");
-        }
+        if (abortSignal.aborted) throw new Error("Aborted");
         
         const result = JSON.parse(response.text);
         return result.triples || [];
@@ -321,9 +513,7 @@ export const extractRelationships = async (
     } catch (e) {
         if (e instanceof Error) {
             if (e.message === "Aborted") console.log("Relationship extraction intentionally aborted.");
-            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
-                throw new Error("429 - Rate limit exceeded.");
-            }
+            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) throw new Error("429 - Rate limit exceeded.");
             throw e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e;
         } else {
             throw new Error("An unknown error occurred during relationship extraction.");

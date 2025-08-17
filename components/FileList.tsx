@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { FileIcon, TrashIcon, LoaderIcon, CheckCircleIcon, AlertTriangleIcon, ClockIcon, CheckboxCheckedIcon, CheckboxUncheckedIcon, DatabaseIcon, ChevronDownIcon, ChevronRightIcon } from './icons';
 import type { ExtractionStep, DocumentSection } from '../types';
@@ -86,7 +87,7 @@ const FileList: React.FC<FileListProps> = ({ files, selectedFiles, onFileSelecti
                                 <button onClick={() => !isProcessing && onFileSelectionChange(file.name, !isSelected)} disabled={isProcessing} className={isProcessing ? 'cursor-not-allowed' : 'cursor-pointer'}>
                                     {isSelected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-primary flex-shrink-0"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />}
                                 </button>
-                                <button onClick={() => toggleFileExpansion(file.name)} className="p-1 rounded-full hover:bg-gray-200">
+                                <button onClick={() => toggleFileExpansion(file.name)} className="p-1 rounded-full text-gray-500 hover:bg-gray-200">
                                     {isExpanded ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
                                 </button>
                                 <FileIcon className="w-5 h-5 text-gray-500 flex-shrink-0" />

@@ -217,3 +217,9 @@ export const ShareIcon: React.FC<{ className?: string }> = ({ className = "w-5 h
         <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.367 2.684 3 3 0 00-5.367-2.684z" />
     </svg>
 );
+
+export const FlaskIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.363-.886a2 2 0 01-1.522-1.934V4.5a2 2 0 00-2-2h-3.812a2 2 0 00-2 2v5.563a2 2 0 01-1.522 1.934l-2.363.886a2 2 0 00-1.022.547H3V19h18v-3.572h-1.572z" />
+    </svg>
+);

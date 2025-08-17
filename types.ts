@@ -71,6 +71,7 @@ export type ExtractionStep =
   | 'ready'
   | 'queued'
   | 'parsing'
+  | 'analyzingSchemaFit'
   | 'extractingEntities'
   | 'awaitingReview' // For an individual file that is done and waiting for others
   | 'reviewing' // Global step when all files are ready for review
@@ -93,4 +94,28 @@ export interface ProcessingStats {
   relationshipExtractionDuration?: number;
   entityTypeCounts: Record<string, number>;
   predicateTypeCounts: Record<string, number>;
+}
+
+export interface PaperCore {
+  questions: string[];
+  data_used: { name: string; role: string; type_hint: string }[];
+  study_area: string[];
+  time_interval: string[];
+  methods: string[];
+  key_results: string[];
+  evidence_spans: { quote: string; page: number | null; offset: [number, number] | null }[];
+}
+
+export interface SchemaCapabilityProfile {
+  entity_types: string[];
+  predicates: string[];
+  type_rules: Record<string, { domain: string[]; range: string[] }>;
+}
+
+export interface FitReport {
+  covered: { item: string; maps_to?: string; reason?: string }[];
+  uncovered: { item: string; maps_to?: string; reason?: string }[];
+  coverage_score: number;
+  decision: 'schema_mode' | 'automated_mode';
+  rationale: string;
 }

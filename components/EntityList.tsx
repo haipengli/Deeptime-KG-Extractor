@@ -6,16 +6,17 @@ import { CheckboxCheckedIcon, CheckboxUncheckedIcon, InfoIcon, ChevronDownIcon, 
 
 interface EntityListProps {
   entities: ExtractedEntity[];
-  onEntitySelectionChange: (index: number, selected: boolean) => void;
-  onSelectAll: () => void;
-  onSelectNone: () => void;
+  onEntitySelectionChange?: (index: number, selected: boolean) => void;
+  onSelectAll?: () => void;
+  onSelectNone?: () => void;
   sourceDescription?: string;
+  readOnly?: boolean;
 }
 
 type SortKey = 'name' | 'confidence' | 'type';
 type SortDirection = 'asc' | 'desc';
 
-const EntityList: React.FC<EntityListProps> = ({ entities, onEntitySelectionChange, onSelectAll, onSelectNone, sourceDescription }) => {
+const EntityList: React.FC<EntityListProps> = ({ entities, onEntitySelectionChange, onSelectAll, onSelectNone, sourceDescription, readOnly = false }) => {
   const selectedCount = entities.filter(e => e.selected).length;
   const [sortKey, setSortKey] = useState<SortKey>('name');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
@@ -68,28 +69,34 @@ const EntityList: React.FC<EntityListProps> = ({ entities, onEntitySelectionChan
     <div className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-4 pb-4 border-b">
         <div>
-          <h2 className="text-2xl font-bold text-brand-dark">Step 2: Review Extracted Entities</h2>
-          <p className="text-sm text-gray-600">
-            {sourceDescription 
-                ? <>Entities extracted from <span className="font-semibold text-brand-dark">{sourceDescription}</span>. Select which to use.</>
-                : "Select the entities to include in the relationship extraction."
-            }
-          </p>
+          <h2 className="text-2xl font-bold text-brand-dark">{readOnly ? 'Entities Used in Extraction' : 'Step 2: Review Extracted Entities'}</h2>
+          {!readOnly && (
+            <p className="text-sm text-gray-600">
+                {sourceDescription 
+                    ? <>Entities extracted from <span className="font-semibold text-brand-dark">{sourceDescription}</span>. Select which to use.</>
+                    : "Select the entities to include in the relationship extraction."
+                }
+            </p>
+          )}
         </div>
-        <div className="flex items-center space-x-2">
-            <span className="text-sm font-semibold text-gray-700">{selectedCount} / {entities.length} selected</span>
-        </div>
+        {!readOnly && (
+            <div className="flex items-center space-x-2">
+                <span className="text-sm font-semibold text-gray-700">{selectedCount} / {entities.length} selected</span>
+            </div>
+        )}
       </div>
       
-       <div className="mb-4 flex items-center justify-between p-2 bg-gray-50 rounded-md">
-            <div className="flex items-center space-x-4">
-                <button onClick={onSelectAll} className="text-sm font-semibold text-brand-primary hover:underline">
-                    Select All
-                </button>
-                <button onClick={onSelectNone} className="text-sm font-semibold text-brand-primary hover:underline">
-                    Select None
-                </button>
-            </div>
+       <div className={`mb-4 flex items-center p-2 bg-gray-50 rounded-md ${readOnly ? 'justify-end' : 'justify-between'}`}>
+            {!readOnly && (
+              <div className="flex items-center space-x-4">
+                  <button onClick={onSelectAll} className="text-sm font-semibold text-brand-primary hover:underline">
+                      Select All
+                  </button>
+                  <button onClick={onSelectNone} className="text-sm font-semibold text-brand-primary hover:underline">
+                      Select None
+                  </button>
+              </div>
+            )}
             <div className="flex items-center space-x-3 text-sm">
                 <span className="text-gray-500">Sort by:</span>
                 <SortButton sortKeyName="name" label="Name" />
@@ -107,13 +114,16 @@ const EntityList: React.FC<EntityListProps> = ({ entities, onEntitySelectionChan
             return (
                 <div key={`${entity.name}-${originalIndex}`} className="group relative">
                     <button
-                    onClick={() => onEntitySelectionChange(originalIndex, !entity.selected)}
+                    onClick={() => !readOnly && onEntitySelectionChange?.(originalIndex, !entity.selected)}
+                    disabled={readOnly}
                     className={`flex items-start w-full text-left p-2 rounded-md border transition-colors duration-150 ${
-                        entity.selected ? 'bg-blue-100 border-blue-300 text-blue-900' : 'bg-gray-100 border-gray-200 text-gray-800 hover:bg-gray-200'
+                        readOnly 
+                            ? 'bg-gray-50 border-gray-200 text-gray-800 cursor-default'
+                            : entity.selected ? 'bg-blue-100 border-blue-300 text-blue-900' : 'bg-gray-100 border-gray-200 text-gray-800 hover:bg-gray-200'
                     }`}
                     >
-                    {entity.selected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-primary flex-shrink-0 mt-0.5"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />}
-                    <div className="flex-grow flex flex-col ml-2">
+                    {!readOnly && (entity.selected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-primary flex-shrink-0 mt-0.5"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />)}
+                    <div className={`flex-grow flex flex-col ${readOnly ? '' : 'ml-2'}`}>
                       <span className="text-sm font-medium leading-tight" title={entity.name}>{entity.name}</span>
                       <span className="text-xs text-brand-secondary font-mono leading-tight">{entity.type}</span>
                     </div>

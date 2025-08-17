@@ -1,8 +1,8 @@
 
 import React, { useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from 'react';
-import type { Triple, Schema, LLMProvider, ExtractedEntity, ExtractionStep, SchemaSuggestion, DocumentSection, TurboOutput, ProcessingStats } from './types';
+import type { Triple, Schema, LLMProvider, ExtractedEntity, ExtractionStep, SchemaSuggestion, DocumentSection, TurboOutput, ProcessingStats, PaperCore, FitReport } from './types';
 import { View } from './types';
-import { extractEntities, extractRelationships, suggestRelationships, extractInTurboMode } from './services/extractionService';
+import { extractEntities, extractRelationships, suggestRelationships, extractInTurboMode, extractPaperCore, generateSchemaCapabilityProfile, generateFitReport } from './services/extractionService';
 import { parsePdfToSections } from './services/pdfParsingService';
 import Header from './components/Header';
 import TripleCard from './components/TripleCard';
@@ -12,6 +12,7 @@ import FileList from './components/FileList';
 import SuggestionReviewer from './components/SuggestionReviewer';
 import StatisticsDisplay from './components/StatisticsDisplay';
 import GraphViewer from './components/GraphViewer';
+import ExtractionAnalysis from './components/ExtractionAnalysis';
 import { BrainCircuitIcon, SchemaIcon, LoaderIcon, CopyIcon, CheckIcon, AlertTriangleIcon, UploadCloudIcon, DownloadIcon, DatabaseIcon, InfoIcon, StopIcon, SparklesIcon, ChevronDownIcon, KeyIcon, ServerIcon, PlusIcon, TrashIcon, LayoutListIcon, ShareIcon } from './components/icons';
 import { DEFAULT_SCHEMA } from './constants';
 
@@ -45,6 +46,8 @@ const App: React.FC = () => {
   const [triples, setTriples] = useState<Triple[]>([]);
   const [entities, setEntities] = useState<ExtractedEntity[]>([]);
   const [suggestions, setSuggestions] = useState<SchemaSuggestion[]>([]);
+  const [paperCore, setPaperCore] = useState<PaperCore | null>(null);
+  const [fitReport, setFitReport] = useState<FitReport | null>(null);
   
   // Document Handling State
   const [managedFiles, setManagedFiles] = useState<ManagedFile[]>([]);
@@ -58,9 +61,11 @@ const App: React.FC = () => {
   const [processingStats, setProcessingStats] = useState<ProcessingStats | null>(null);
   const extractionStartTimeRef = useRef<number | null>(null);
   const [entityExtractionDuration, setEntityExtractionDuration] = useState<number | null>(null);
+  const [extractionMode, setExtractionMode] = useState<'schema_mode' | 'automated_mode'>('schema_mode');
+
 
   const isProcessing = useMemo(() => {
-    return managedFiles.some(f => ['queued', 'parsing', 'extractingEntities', 'extractingRelationships'].includes(f.status.step));
+    return managedFiles.some(f => ['queued', 'parsing', 'analyzingSchemaFit', 'extractingEntities', 'extractingRelationships'].includes(f.status.step));
   }, [managedFiles]);
   
   // UI State
@@ -136,6 +141,9 @@ const App: React.FC = () => {
     setError(null);
     setProcessingStats(null);
     setEntityExtractionDuration(null);
+    setPaperCore(null);
+    setFitReport(null);
+    setExtractionMode('schema_mode');
     extractionStartTimeRef.current = null;
     setManagedFiles(prev => prev.map(mf => ({ ...mf, status: { step: 'ready' } })));
     setStep('ready');
@@ -301,6 +309,34 @@ const App: React.FC = () => {
     setActiveSchema(schema);
     handleNewSession();
     
+    // --- Pre-flight Analysis ---
+    setStep('analyzingSchemaFit');
+    const firstFile = filesToProcess[0];
+    const abstractSection = firstFile.sections.find(s => s.title.toLowerCase().includes('abstract'));
+    const abstractText = abstractSection ? abstractSection.content : firstFile.sections.map(s => s.content).join('\n\n').slice(0, 3000);
+
+    let mode: 'schema_mode' | 'automated_mode' = 'schema_mode';
+    if (abstractText) {
+        try {
+            const core = await extractPaperCore(llmProvider, apiKeys[0], abstractText, modelName, abortControllerRef.current!.signal);
+            setPaperCore(core);
+            const profile = generateSchemaCapabilityProfile(schema);
+            const report = generateFitReport(core, profile);
+            setFitReport(report);
+            setExtractionMode(report.decision);
+            mode = report.decision;
+        } catch (e: any) {
+            setError(`Failed during pre-flight analysis: ${e.message}`);
+            setStep('error');
+            return;
+        }
+    } else {
+        setPaperCore(null);
+        setFitReport(null);
+        setExtractionMode('schema_mode');
+    }
+    if (abortControllerRef.current?.signal.aborted) return;
+    
     // --- Cache Check & Remote Processing ---
     const localResults = new Map<string, CachedResult>();
     const filesToProcessRemotely: ManagedFile[] = [];
@@ -313,7 +349,7 @@ const App: React.FC = () => {
         }
         const textHash = simpleHash(text);
         const schemaHash = simpleHash(JSON.stringify(schema));
-        const cacheKey = `${textHash}-${schemaHash}-${modelName}-${isTurboMode}`;
+        const cacheKey = `${textHash}-${schemaHash}-${modelName}-${isTurboMode}-${mode}`;
         const cachedData = localStorage.getItem(cacheKey);
 
         if (cachedData) {
@@ -341,7 +377,7 @@ const App: React.FC = () => {
                 const text = getTextForFile(file);
                 const textHash = simpleHash(text);
                 const schemaHash = simpleHash(JSON.stringify(schema));
-                const cacheKey = `${textHash}-${schemaHash}-${modelName}-${isTurboMode}`;
+                const cacheKey = `${textHash}-${schemaHash}-${modelName}-${isTurboMode}-${mode}`;
                 localStorage.setItem(cacheKey, JSON.stringify(result));
             };
             taskSuccess = await handleExtractionWorkflow(filesToProcessRemotely, task, onResult);
@@ -351,7 +387,7 @@ const App: React.FC = () => {
             const task = async (file: ManagedFile, apiKey: string, signal: AbortSignal) => {
                 updateFileStatus(file.name, { step: 'extractingEntities' });
                 const text = getTextForFile(file);
-                const { entities, suggestions } = await extractEntities(llmProvider, apiKey, text, schema, modelName, signal);
+                const { entities, suggestions } = await extractEntities(llmProvider, apiKey, text, schema, modelName, mode, signal);
                 return {
                     entities,
                     suggestions: suggestions.filter(s => s.type === 'entity')
@@ -482,7 +518,7 @@ const App: React.FC = () => {
         const selectedEntities = entities.filter(e => e.selected);
 
         const fileTriples = await extractRelationships(
-            llmProvider, apiKey, text, activeSchema, selectedEntities, modelName, signal
+            llmProvider, apiKey, text, activeSchema, selectedEntities, modelName, extractionMode, signal
         );
         if (signal.aborted) throw new Error("Aborted");
         
@@ -499,7 +535,7 @@ const App: React.FC = () => {
         const text = getTextForFile(file);
         const textHash = simpleHash(text);
         const schemaHash = simpleHash(JSON.stringify(activeSchema));
-        const cacheKey = `${textHash}-${schemaHash}-${modelName}-${isTurboMode}`;
+        const cacheKey = `${textHash}-${schemaHash}-${modelName}-${isTurboMode}-${extractionMode}`;
         const finalEntities = entities.filter(e => e.selected); 
         const entitySuggestions = suggestions.filter(s => s.type === 'entity');
         const finalSuggestions = [...entitySuggestions, ...result.suggestions];
@@ -774,7 +810,7 @@ const App: React.FC = () => {
       return (
         <div className="w-full lg:w-2/3 xl:w-3/4 p-4">
           <div className="bg-white p-6 rounded-lg shadow-lg border border-gray-200 h-[calc(100vh-120px)] flex flex-col">
-            { (step === 'reviewing' || step === 'complete' || step === 'extractingRelationships' || step === 'error') && (
+            { (step !== 'ready' && step !== 'parsing' && step !== 'queued') && (
                 <div className="flex justify-between items-start mb-4 pb-4 border-b">
                     <div>
                         <h2 className="text-2xl font-bold text-brand-dark mb-2">
@@ -824,6 +860,11 @@ const App: React.FC = () => {
             )}
             
             <div className="flex-grow overflow-y-auto pr-2" ref={resultsScrollRef}>
+                { (paperCore && fitReport) && (
+                    <div className="mb-4">
+                        <ExtractionAnalysis paperCore={paperCore} fitReport={fitReport} />
+                    </div>
+                )}
                 {processingStats && (
                     <div className="mb-4">
                         <StatisticsDisplay 
@@ -899,6 +940,15 @@ const App: React.FC = () => {
 
                 {(step === 'extractingRelationships' || step === 'complete') && (
                   <>
+                    {step === 'complete' && entities.filter(e => e.selected).length > 0 && (
+                      <div id="entity-review-section" className="mb-6">
+                        <EntityList 
+                          entities={entities.filter(e => e.selected)}
+                          readOnly={true}
+                        />
+                      </div>
+                    )}
+                    
                     {resultsViewMode === 'list' && triples.length > 0 && (
                       <div id="triples-list-section" className="grid grid-cols-1 gap-4">
                           {triples.map((triple, index) => ( 

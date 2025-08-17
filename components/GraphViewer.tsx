@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
 import cytoscape, { Core } from 'cytoscape';
@@ -152,7 +153,7 @@ const GraphViewer: React.FC<GraphViewerProps> = ({ triples, entities }) => {
     const stylesheet: cytoscape.StylesheetCSS[] = [
         {
             selector: 'node',
-            style: {
+            css: {
                 'background-color': 'data(color)',
                 'label': 'data(label)',
                 'width': 25,
@@ -161,14 +162,14 @@ const GraphViewer: React.FC<GraphViewerProps> = ({ triples, entities }) => {
                 'color': '#333',
                 'text-background-opacity': 0.8,
                 'text-background-color': '#ffffff',
-                'text-background-shape': 'round-rectangle',
+                'text-background-shape': 'roundrectangle',
                 'text-background-padding': '2px',
                 'text-outline-width': 0,
             }
         },
         {
             selector: 'edge',
-            style: {
+            css: {
                 'width': 1.5,
                 'label': 'data(label)',
                 'line-color': '#aab',
@@ -180,13 +181,13 @@ const GraphViewer: React.FC<GraphViewerProps> = ({ triples, entities }) => {
                 'text-rotation': 'autorotate',
                 'text-background-opacity': 0.8,
                 'text-background-color': '#ffffff',
-                'text-background-shape': 'round-rectangle',
+                'text-background-shape': 'roundrectangle',
                 'text-background-padding': '2px'
             }
         },
         {
             selector: '.hidden',
-            style: {
+            css: {
                 'display': 'none'
             }
         }
@@ -211,10 +212,10 @@ const GraphViewer: React.FC<GraphViewerProps> = ({ triples, entities }) => {
             <div className="flex-grow w-full h-full border rounded-md overflow-hidden bg-white">
                 <CytoscapeComponent
                     elements={elements}
-                    stylesheet={stylesheet}
                     style={{ width: '100%', height: '100%' }}
-                    cy={(instance) => setCy(instance)}
-                    layout={{ name: 'cose', fit: true, padding: 30 }}
+                    cy={setCy}
+                    layout={{ name: 'cose', animate: true, fit: true, padding: 30 }}
+                    stylesheet={stylesheet}
                 />
             </div>
         </div>
