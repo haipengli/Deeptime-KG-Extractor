@@ -18,23 +18,10 @@ export interface ExtractedEntity {
   justification?: string;
 }
 
-export interface SchemaSuggestion {
-  type: 'entity' | 'predicate';
-  name: string;
-  justification: string;
-  
-  // For 'entity' type
-  categorySuggestion?: string;
-
-  // For 'predicate' type
-  exampleTriple?: {
-    subject: string;
-    object: string;
-  };
-}
-
-export interface DocumentSection {
-    title: string;
+export interface DocumentChunk {
+    id: string;
+    sectionPath: string[];
+    kind: 'body' | 'caption' | 'table' | 'methods' | 'references';
     content: string;
     selected: boolean;
 }
@@ -49,6 +36,7 @@ export interface Schema {
   meta: {
     id: string;
     purpose: string;
+    version: string;
   };
   predicates: {
     predicateCategories: Record<string, string[]>;
@@ -63,6 +51,7 @@ export interface Schema {
 export enum View {
   Extractor,
   Schema,
+  Prompts,
 }
 
 export type LLMProvider = 'gemini' | 'openai' | 'anthropic';
@@ -71,10 +60,11 @@ export type ExtractionStep =
   | 'ready'
   | 'queued'
   | 'parsing'
+  | 'structuring'
   | 'analyzingSchemaFit'
   | 'extractingEntities'
-  | 'awaitingReview' // For an individual file that is done and waiting for others
-  | 'reviewing' // Global step when all files are ready for review
+  | 'awaitingReview' 
+  | 'reviewing'
   | 'extractingRelationships'
   | 'complete'
   | 'cached'
@@ -119,3 +109,58 @@ export interface FitReport {
   decision: 'schema_mode' | 'automated_mode';
   rationale: string;
 }
+
+export interface SchemaSuggestion {
+  type: 'entity' | 'predicate';
+  name: string;
+  justification: string;
+  categorySuggestion?: string;
+  exampleTriple?: { subject: string; object: string; };
+}
+
+export interface SchemaProposal {
+  id: string; // e.g., proposal-168...
+  baseVersion: string;
+  new_types: {
+    name: string;
+    definition: string;
+    closest_parent: string | null;
+    examples: string[];
+  }[];
+  new_predicates: {
+    name: string;
+    description: string;
+    domain: string[];
+    range: string[];
+    example: {
+      subject: string;
+      object: string;
+      evidenceText: string;
+    };
+  }[];
+  evidence: {
+    paperId: string;
+    quotes: string[];
+  };
+}
+
+export interface LlmConfig {
+  apiKey: string;
+  model: 'gemini-2.5-flash';
+  temperature: number;
+}
+
+export interface PromptVersion {
+  version: number;
+  template: string;
+  date: string;
+}
+
+export interface Prompt {
+  name: string;
+  description: string;
+  versions: PromptVersion[];
+  activeVersion: number;
+}
+
+export type PromptCollection = Record<string, Prompt>;

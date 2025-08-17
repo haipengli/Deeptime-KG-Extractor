@@ -2,7 +2,8 @@ import type { Schema } from './types';
 
 export const DEFAULT_SCHEMA: Schema = {
   meta: {
-    id: 'DeepTimeLabelSet-v0.9.1',
+    id: 'DeepTimeLabelSet-v1.0.0',
+    version: '1.0.0',
     purpose: 'LLM-driven KG extraction from scientific papers: evidence-anchored, audit-ready. Optimized for entity & relationship extraction in deep-time research with a typed ontology.',
   },
   predicates: {

@@ -1,7 +1,13 @@
 
-import React from 'react';
 
-const Header: React.FC = () => {
+import React from 'react';
+import { CogIcon } from './icons';
+
+interface HeaderProps {
+    onSettingsClick: () => void;
+}
+
+const Header: React.FC<HeaderProps> = ({ onSettingsClick }) => {
   return (
     <header className="bg-brand-dark shadow-md p-4 flex items-center justify-between">
       <div className="flex items-center space-x-3">
@@ -11,6 +17,15 @@ const Header: React.FC = () => {
         <h1 className="text-2xl font-bold text-white tracking-tight">
           DeepTime KG Extractor
         </h1>
+      </div>
+      <div>
+        <button 
+            onClick={onSettingsClick} 
+            className="p-2 rounded-full text-gray-300 hover:bg-brand-secondary hover:text-white transition-colors"
+            aria-label="Settings"
+        >
+            <CogIcon className="w-6 h-6" />
+        </button>
       </div>
     </header>
   );

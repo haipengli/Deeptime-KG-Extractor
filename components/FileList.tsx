@@ -1,11 +1,11 @@
 
 import React, { useState } from 'react';
 import { FileIcon, TrashIcon, LoaderIcon, CheckCircleIcon, AlertTriangleIcon, ClockIcon, CheckboxCheckedIcon, CheckboxUncheckedIcon, DatabaseIcon, ChevronDownIcon, ChevronRightIcon } from './icons';
-import type { ExtractionStep, DocumentSection } from '../types';
+import type { ExtractionStep, DocumentChunk } from '../types';
 
 interface ManagedFile {
     name: string;
-    sections: DocumentSection[];
+    chunks?: DocumentChunk[];
     status: { step: ExtractionStep; message?: string };
 }
 
@@ -13,7 +13,7 @@ interface FileListProps {
   files: ManagedFile[];
   selectedFiles: Set<string>;
   onFileSelectionChange: (fileName: string, selected: boolean) => void;
-  onSectionSelectionChange: (fileName: string, sectionIndex: number, selected: boolean) => void;
+  onSectionSelectionChange: (fileName: string, chunkId: string, selected: boolean) => void;
   onDeleteFile: (fileName: string) => void;
 }
 
@@ -27,6 +27,8 @@ const StatusIndicator: React.FC<{ status: { step: ExtractionStep; message?: stri
             case 'queued':
                 return { icon: <ClockIcon className="w-4 h-4 text-gray-500" />, text: 'Queued', color: 'text-gray-600' };
             case 'parsing':
+            case 'structuring':
+            case 'analyzingSchemaFit':
             case 'extractingEntities':
             case 'extractingRelationships':
                 return { icon: <LoaderIcon className="w-4 h-4 text-blue-500 animate-spin" />, text: 'Processing...', color: 'text-blue-600' };
@@ -78,7 +80,7 @@ const FileList: React.FC<FileListProps> = ({ files, selectedFiles, onFileSelecti
             {files.map((file) => {
                 const isSelected = selectedFiles.has(file.name);
                 const isExpanded = expandedFiles.has(file.name);
-                const isProcessing = ['queued', 'parsing', 'extractingEntities', 'extractingRelationships'].includes(file.status.step);
+                const isProcessing = ['queued', 'parsing', 'structuring', 'analyzingSchemaFit', 'extractingEntities', 'extractingRelationships'].includes(file.status.step);
 
                 return (
                     <div key={file.name} className="bg-white border border-gray-200 rounded-md">
@@ -87,7 +89,7 @@ const FileList: React.FC<FileListProps> = ({ files, selectedFiles, onFileSelecti
                                 <button onClick={() => !isProcessing && onFileSelectionChange(file.name, !isSelected)} disabled={isProcessing} className={isProcessing ? 'cursor-not-allowed' : 'cursor-pointer'}>
                                     {isSelected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-primary flex-shrink-0"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />}
                                 </button>
-                                <button onClick={() => toggleFileExpansion(file.name)} className="p-1 rounded-full text-gray-500 hover:bg-gray-200">
+                                <button onClick={() => toggleFileExpansion(file.name)} className="p-1 rounded-full text-gray-500 hover:bg-gray-200 disabled:cursor-not-allowed" disabled={!file.chunks || file.chunks.length === 0}>
                                     {isExpanded ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
                                 </button>
                                 <FileIcon className="w-5 h-5 text-gray-500 flex-shrink-0" />
@@ -103,15 +105,18 @@ const FileList: React.FC<FileListProps> = ({ files, selectedFiles, onFileSelecti
 
                         {isExpanded && (
                             <div className="pl-12 pr-4 pb-2 pt-1 border-t border-gray-200 space-y-1">
-                                {file.sections.length > 0 ? file.sections.map((section, index) => (
-                                    <div key={index} className="flex items-center">
-                                        <button onClick={() => onSectionSelectionChange(file.name, index, !section.selected)} className="flex items-center space-x-2 w-full text-left p-1 rounded-md hover:bg-gray-100">
-                                            {section.selected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-secondary flex-shrink-0"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />}
-                                            <span className="text-xs truncate text-gray-800" title={section.title}>{section.title}</span>
-                                        </button>
-                                    </div>
-                                )) : (
-                                    <p className="text-xs text-gray-500 italic">No sections found by local parser.</p>
+                                {file.chunks && file.chunks.length > 0 ? file.chunks.map((chunk) => {
+                                    const title = chunk.sectionPath.join(' > ') || 'Untitled Section';
+                                    return (
+                                        <div key={chunk.id} className="flex items-center">
+                                            <button onClick={() => onSectionSelectionChange(file.name, chunk.id, !chunk.selected)} className="flex items-center space-x-2 w-full text-left p-1 rounded-md hover:bg-gray-100">
+                                                {chunk.selected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-secondary flex-shrink-0"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />}
+                                                <span className="text-xs truncate text-gray-800" title={title}>{title}</span>
+                                            </button>
+                                        </div>
+                                    )
+                                }) : (
+                                    <p className="text-xs text-gray-500 italic">Document not yet structured into sections.</p>
                                 )}
                             </div>
                         )}

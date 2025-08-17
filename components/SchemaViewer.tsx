@@ -1,4 +1,5 @@
 
+
 import React, { useState } from 'react';
 import type { Schema } from '../types';
 import { EditIcon, SaveIcon, ResetIcon, PlusIcon, XIcon, TrashIcon, InfoIcon, LockClosedIcon, LockOpenIcon, ChevronDownIcon, ChevronRightIcon } from './icons';
@@ -305,7 +306,10 @@ const SchemaViewer: React.FC<SchemaEditorProps> = ({ schema, onSchemaChange, onS
   return (
     <div className="bg-white p-6 rounded-lg shadow-lg border border-gray-200">
       <div className="flex justify-between items-center mb-4">
-        <h2 className="text-2xl font-bold text-brand-dark">Schema Editor</h2>
+        <div>
+          <h2 className="text-2xl font-bold text-brand-dark">Schema Editor</h2>
+          <p className="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-1 rounded-md inline-block mt-1">Version: {schema.meta.version}</p>
+        </div>
         <div className="flex items-center space-x-4">
             <button onClick={() => setIsEditing(!isEditing)} className={`flex items-center space-x-2 text-sm font-semibold py-1 px-3 rounded-md transition-colors duration-200 ${isEditing ? 'text-yellow-800 bg-yellow-100 hover:bg-yellow-200' : 'text-gray-600 hover:text-brand-primary hover:bg-gray-100'}`}>
                 {isEditing ? <LockOpenIcon className="w-4 h-4" /> : <LockClosedIcon className="w-4 h-4" />}
