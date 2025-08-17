@@ -347,24 +347,14 @@ const App: React.FC = () => {
 
         } else {
             setStep('extractingEntities');
-            const task = (file: ManagedFile, apiKey: string, signal: AbortSignal) => {
-                return new Promise<{ entities: ExtractedEntity[], suggestions: SchemaSuggestion[] }>(async (resolve, reject) => {
-                    try {
-                        updateFileStatus(file.name, { step: 'extractingEntities' });
-                        const text = getTextForFile(file);
-                        const fileEntities = new Set<string>();
-                        const fileSuggestions: SchemaSuggestion[] = [];
-                        extractEntities(llmProvider, apiKey, text, schema, modelName,
-                            (entityName) => fileEntities.add(entityName),
-                            (suggestion) => fileSuggestions.push(suggestion),
-                            () => resolve({
-                                entities: Array.from(fileEntities).sort().map(name => ({ name, selected: true })),
-                                suggestions: fileSuggestions.filter(s => s.type === 'entity')
-                            }),
-                            (e) => reject(e), signal
-                        );
-                    } catch (e) { reject(e); }
-                });
+            const task = async (file: ManagedFile, apiKey: string, signal: AbortSignal) => {
+                updateFileStatus(file.name, { step: 'extractingEntities' });
+                const text = getTextForFile(file);
+                const { entities, suggestions } = await extractEntities(llmProvider, apiKey, text, schema, modelName, signal);
+                return {
+                    entities: entities.sort().map(name => ({ name, selected: true })),
+                    suggestions: suggestions.filter(s => s.type === 'entity')
+                };
             };
             const onResult = (file: ManagedFile, result: { entities: ExtractedEntity[], suggestions: SchemaSuggestion[] }) => {
                 const existing = localResults.get(file.name) || { entities: [], triples: [], suggestions: [] };
@@ -431,32 +421,23 @@ const App: React.FC = () => {
     const filesToProcess = managedFiles.filter(f => f.status.step === 'awaitingReview' && selectedFiles.has(f.name));
     const localResults = new Map<string, {triples: Omit<Triple, 'source'>[], suggestions: SchemaSuggestion[]}>();
     
-    const task = (file: ManagedFile, apiKey: string, signal: AbortSignal) => {
-        return new Promise<{ triples: Omit<Triple, 'source'>[], suggestions: SchemaSuggestion[] }>(async (resolve, reject) => {
-            try {
-                const text = getTextForFile(file);
-                if (!text) return resolve({ triples: [], suggestions: [] });
-                updateFileStatus(file.name, { step: 'extractingRelationships' });
-                const selectedEntityNames = entities.filter(e => e.selected).map(e => e.name);
+    const task = async (file: ManagedFile, apiKey: string, signal: AbortSignal) => {
+        const text = getTextForFile(file);
+        if (!text) return { triples: [], suggestions: [] };
+        updateFileStatus(file.name, { step: 'extractingRelationships' });
+        const selectedEntityNames = entities.filter(e => e.selected).map(e => e.name);
 
-                const fileTriples: Omit<Triple, 'source'>[] = [];
-                const fileSuggestions: SchemaSuggestion[] = [];
+        const fileTriples = await extractRelationships(
+            llmProvider, apiKey, text, activeSchema, selectedEntityNames, modelName, signal
+        );
+        if (signal.aborted) throw new Error("Aborted");
+        
+        const fileSuggestions = await suggestRelationships(
+            llmProvider, apiKey, text, activeSchema, selectedEntityNames, modelName, signal
+        );
+        if (signal.aborted) throw new Error("Aborted");
 
-                await new Promise<void>((relResolve, relReject) => extractRelationships(
-                    llmProvider, apiKey, text, activeSchema, selectedEntityNames, modelName,
-                    (triple) => fileTriples.push(triple), relResolve, relReject, signal
-                ));
-                if (signal.aborted) return reject(new Error("Aborted"));
-                
-                await new Promise<void>((sugResolve, sugReject) => suggestRelationships(
-                    llmProvider, apiKey, text, activeSchema, selectedEntityNames, modelName,
-                    (suggestion) => fileSuggestions.push(suggestion), sugResolve, sugReject, signal
-                ));
-                if (signal.aborted) return reject(new Error("Aborted"));
-
-                resolve({ triples: fileTriples, suggestions: fileSuggestions });
-            } catch (e) { reject(e); }
-        });
+        return { triples: fileTriples, suggestions: fileSuggestions };
     };
 
     const onResult = (file: ManagedFile, result: {triples: Omit<Triple, 'source'>[], suggestions: SchemaSuggestion[]}) => {

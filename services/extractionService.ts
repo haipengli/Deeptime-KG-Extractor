@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput } from '../types';
 
 // --- Utility Functions ---
@@ -56,19 +56,12 @@ const generateEntityPrompt = (documentText: string, schema: Schema): string => {
     ${schemaSummary}
 
     Output Format:
-    Your output MUST be a stream of valid, complete JSON objects.
-    - Do NOT wrap the output in a markdown block (e.g., \`\`\`json) or a top-level JSON array.
-    - Send each JSON object as soon as it is identified.
+    Your output MUST be a single, valid JSON object conforming to the required schema. It should contain two keys: 'entities' (an array of strings) and 'suggestions' (an array of suggestion objects).
 
-    - For an EXISTING entity, stream a JSON object like this:
-      {"entity": "Lingshui Formation"}
+    - 'categorySuggestion' for new suggestions MUST be one of: ${observableCategories}, ${interpretiveCategories}.
+    - 'justification' should be a brief explanation of why it's a good suggestion.
 
-    - For a NEW suggested entity concept, stream a JSON object like this:
-      {"newEntitySuggestion": {"name": "Seismic Facies", "categorySuggestion": "ObservationalRecord", "justification": "This term appears frequently and is a key concept for analysis but is not in the schema."}}
-      - 'categorySuggestion' MUST be one of: ${observableCategories}, ${interpretiveCategories}.
-      - 'justification' should be a brief explanation of why it's a good suggestion.
-
-    Now, process the following document text and extract all relevant entities and suggestions:
+    Now, process the following document text and extract all relevant entities and suggestions.
 
     --- DOCUMENT START ---
     ${documentText}
@@ -82,98 +75,72 @@ export const extractEntities = async (
     documentText: string,
     schema: Schema,
     modelName: string,
-    onEntityReceived: (entity: string) => void,
-    onSuggestionReceived: (suggestion: SchemaSuggestion) => void,
-    onStreamEnd: () => void,
-    onError: (error: Error) => void,
     abortSignal: AbortSignal
-) => {
+): Promise<{ entities: string[], suggestions: SchemaSuggestion[] }> => {
     if (provider !== 'gemini') {
-        onError(new Error(`${provider} is not yet supported. Please select Google Gemini.`));
-        onStreamEnd();
-        return;
+        throw new Error(`${provider} is not yet supported. Please select Google Gemini.`);
     }
     if (!apiKey) {
-        onError(new Error('Gemini API key is missing.'));
-        onStreamEnd();
-        return;
+        throw new Error('Gemini API key is missing.');
     }
 
     const prompt = generateEntityPrompt(documentText, schema);
-    let buffer = '';
     const ai = new GoogleGenAI({ apiKey });
 
     try {
-        const responseStream = await ai.models.generateContentStream({
+        const response = await ai.models.generateContent({
             model: modelName,
             contents: prompt,
+            config: {
+                temperature: 0,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        entities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        suggestions: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    name: { type: Type.STRING },
+                                    categorySuggestion: { type: Type.STRING },
+                                    justification: { type: Type.STRING }
+                                },
+                                required: ["name", "categorySuggestion", "justification"]
+                            }
+                        }
+                    },
+                    required: ["entities", "suggestions"]
+                }
+            }
         });
 
-        for await (const chunk of responseStream) {
-            if (abortSignal.aborted) break;
-
-            buffer += chunk.text;
-            let lastIndex = 0;
-            while (true) {
-                const startIndex = buffer.indexOf('{', lastIndex);
-                if (startIndex === -1) break;
-                
-                let braceCount = 1;
-                let endIndex = -1;
-                let inString = false;
-                
-                for (let i = startIndex + 1; i < buffer.length; i++) {
-                    const char = buffer[i];
-                    if (char === '"' && (i === 0 || buffer[i-1] !== '\\')) inString = !inString;
-                    if (!inString) {
-                        if (char === '{') braceCount++;
-                        else if (char === '}') braceCount--;
-                    }
-                    if (!inString && braceCount === 0) {
-                        endIndex = i;
-                        break;
-                    }
-                }
-
-                if (endIndex !== -1) {
-                    const objectString = buffer.substring(startIndex, endIndex + 1);
-                    try {
-                        const item = JSON.parse(objectString);
-                        if (item.entity && typeof item.entity === 'string') {
-                            onEntityReceived(item.entity);
-                        } else if (item.newEntitySuggestion) {
-                            const sug = item.newEntitySuggestion;
-                            onSuggestionReceived({
-                                type: 'entity',
-                                name: sug.name,
-                                categorySuggestion: sug.categorySuggestion,
-                                justification: sug.justification
-                            });
-                        }
-                    } catch (e) {
-                        console.warn('Could not parse potential JSON object from entity stream:', objectString);
-                    }
-                    lastIndex = endIndex + 1;
-                } else {
-                  break;
-                }
-            }
-            if (lastIndex > 0) buffer = buffer.substring(lastIndex);
-        }
-    } catch (e) {
         if (abortSignal.aborted) {
-            console.log("Entity stream intentionally aborted.");
-        } else if (e instanceof Error) {
-            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
-                onError(new Error("429 - Rate limit exceeded."));
-            } else {
-                onError(e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e);
-            }
-        } else {
-            onError(new Error("An unknown error occurred."));
+            throw new Error("Aborted");
         }
-    } finally {
-        onStreamEnd();
+        
+        const result = JSON.parse(response.text);
+        
+        const formattedSuggestions: SchemaSuggestion[] = result.suggestions.map((s: any) => ({
+            type: 'entity',
+            name: s.name,
+            categorySuggestion: s.categorySuggestion,
+            justification: s.justification,
+        }));
+
+        return { entities: result.entities, suggestions: formattedSuggestions };
+
+    } catch (e) {
+         if (e instanceof Error) {
+            if (e.message === "Aborted") console.log("Entity extraction intentionally aborted.");
+            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
+                throw new Error("429 - Rate limit exceeded.");
+            }
+            throw e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e;
+        } else {
+            throw new Error("An unknown error occurred during entity extraction.");
+        }
     }
 };
 
@@ -201,15 +168,11 @@ const generateRelationshipPrompt = (documentText: string, schema: Schema, entiti
     ${predicateSummary}
 
     Output Format:
-    Your output MUST be a stream of valid, complete JSON objects.
-    - Each JSON object represents a single triple.
-    - Do NOT wrap the output in a markdown block (e.g., \`\`\`json) or a top-level JSON array.
-    - Send each JSON object as soon as it is identified.
-    - For each triple, the 'evidenceText' must be a direct quote from the source document that supports the assertion.
+    Your output MUST be a single, valid JSON object containing a single top-level key "triples".
+    - The value of "triples" must be an array of triple objects.
+    - Each triple object must have four keys: "subject" (string), "predicate" (string), "object" (string), and "evidenceText" (a direct quote from the source document).
     - CRITICAL: Ensure all string values within the JSON, especially 'evidenceText', are properly escaped (e.g., \\" for double quotes).
-    - Example of a single, complete JSON object to stream:
-      {"subject": "Sandstone", "predicate": "hasProperty", "object": "high porosity", "evidenceText": "The report stated, \\"the sandstone exhibited high porosity.\\""}
-
+    
     Now, process the following document text and extract the triples:
 
     --- DOCUMENT START ---
@@ -225,89 +188,64 @@ export const extractRelationships = async (
     schema: Schema,
     entities: string[],
     modelName: string,
-    onTripleReceived: (triple: Omit<Triple, 'source'>) => void,
-    onStreamEnd: () => void,
-    onError: (error: Error) => void,
     abortSignal: AbortSignal
-) => {
+): Promise<Omit<Triple, 'source'>[]> => {
     if (provider !== 'gemini') {
-        onError(new Error(`${provider} is not yet supported. Please select Google Gemini.`));
-        onStreamEnd();
-        return;
+        throw new Error(`${provider} is not yet supported. Please select Google Gemini.`);
     }
      if (!apiKey) {
-        onError(new Error('Gemini API key is missing.'));
-        onStreamEnd();
-        return;
+        throw new Error('Gemini API key is missing.');
     }
 
     const prompt = generateRelationshipPrompt(documentText, schema, entities);
-    let buffer = '';
     const ai = new GoogleGenAI({ apiKey });
 
      try {
-        const responseStream = await ai.models.generateContentStream({
+        const response = await ai.models.generateContent({
             model: modelName,
             contents: prompt,
+            config: {
+                temperature: 0,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        triples: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    subject: { type: Type.STRING },
+                                    predicate: { type: Type.STRING },
+                                    object: { type: Type.STRING },
+                                    evidenceText: { type: Type.STRING }
+                                },
+                                required: ["subject", "predicate", "object", "evidenceText"]
+                            }
+                        }
+                    },
+                    required: ["triples"]
+                }
+            }
         });
 
-        for await (const chunk of responseStream) {
-            if (abortSignal.aborted) break;
-
-            buffer += chunk.text;
-            let lastIndex = 0;
-            while (true) {
-                const startIndex = buffer.indexOf('{', lastIndex);
-                if (startIndex === -1) break;
-
-                let braceCount = 0;
-                let endIndex = -1;
-                let inString = false;
-                
-                for (let i = startIndex; i < buffer.length; i++) {
-                    const char = buffer[i];
-                    if (char === '"' && (i === 0 || buffer[i-1] !== '\\')) inString = !inString;
-                    if (!inString) {
-                        if (char === '{') braceCount++;
-                        else if (char === '}') braceCount--;
-                    }
-                    if (!inString && braceCount === 0 && startIndex < i) {
-                        endIndex = i;
-                        break;
-                    }
-                }
-                
-                if (endIndex !== -1) {
-                    const objectString = buffer.substring(startIndex, endIndex + 1);
-                    try {
-                        const potentialTriple = JSON.parse(objectString);
-                        if (potentialTriple.subject && potentialTriple.predicate && potentialTriple.object && typeof potentialTriple.evidenceText !== 'undefined') {
-                            onTripleReceived(potentialTriple);
-                        }
-                    } catch (e) {
-                        console.warn('Could not parse potential JSON object from triple stream:', objectString);
-                    }
-                    lastIndex = endIndex + 1;
-                } else {
-                    break;
-                }
-            }
-            if (lastIndex > 0) buffer = buffer.substring(lastIndex);
-        }
-    } catch (e) {
         if (abortSignal.aborted) {
-            console.log("Relationship stream intentionally aborted.");
-        } else if (e instanceof Error) {
-            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
-                onError(new Error("429 - Rate limit exceeded."));
-            } else {
-                onError(e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e);
-            }
-        } else {
-            onError(new Error("An unknown error occurred."));
+            throw new Error("Aborted");
         }
-    } finally {
-        onStreamEnd();
+        
+        const result = JSON.parse(response.text);
+        return result.triples || [];
+
+    } catch (e) {
+        if (e instanceof Error) {
+            if (e.message === "Aborted") console.log("Relationship extraction intentionally aborted.");
+            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
+                throw new Error("429 - Rate limit exceeded.");
+            }
+            throw e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e;
+        } else {
+            throw new Error("An unknown error occurred during relationship extraction.");
+        }
     }
 };
 
@@ -328,12 +266,10 @@ const generateRelationshipSuggestionPrompt = (documentText: string, schema: Sche
     [${entities.map(e => `"${e}"`).join(', ')}]
 
     Output Format:
-    Your output MUST be a stream of valid, complete JSON objects.
-    - Do NOT wrap the output in a markdown block or a top-level array.
-    - Each JSON object represents one new predicate suggestion.
+    Your output MUST be a single, valid JSON object with a top-level key "suggestions".
+    - The value of "suggestions" must be an array of suggestion objects.
+    - Each suggestion object represents one new predicate suggestion.
     - For each suggestion, provide the name, a justification, and an example triple from the text using entities from the list.
-    - Example of a single JSON object to stream:
-      {"suggestion": {"type": "predicate", "name": "erodedBy", "justification": "Captures the physical process of erosion between geological units.", "exampleTriple": {"subject": "Yinggehai Formation", "object": "Ancient River System"}}}
 
     Now, analyze the following text for novel relationship suggestions:
 
@@ -350,75 +286,68 @@ export const suggestRelationships = async (
     schema: Schema,
     entities: string[],
     modelName: string,
-    onSuggestionReceived: (suggestion: SchemaSuggestion) => void,
-    onStreamEnd: () => void,
-    onError: (error: Error) => void,
     abortSignal: AbortSignal
-) => {
+): Promise<SchemaSuggestion[]> => {
     if (provider !== 'gemini' || !apiKey) {
-        onStreamEnd(); return;
+        return [];
     }
 
     const prompt = generateRelationshipSuggestionPrompt(documentText, schema, entities);
-    let buffer = '';
     const ai = new GoogleGenAI({ apiKey });
 
     try {
-        const responseStream = await ai.models.generateContentStream({ model: modelName, contents: prompt });
-
-        for await (const chunk of responseStream) {
-            if (abortSignal.aborted) break;
-            buffer += chunk.text;
-            let lastIndex = 0;
-            while (true) {
-                const startIndex = buffer.indexOf('{', lastIndex);
-                if (startIndex === -1) break;
-
-                let braceCount = 1, endIndex = -1, inString = false;
-                for (let i = startIndex + 1; i < buffer.length; i++) {
-                    const char = buffer[i];
-                    if (char === '"' && (i === 0 || buffer[i-1] !== '\\')) inString = !inString;
-                    if (!inString) {
-                        if (char === '{') braceCount++;
-                        else if (char === '}') braceCount--;
-                    }
-                    if (!inString && braceCount === 0) {
-                        endIndex = i;
-                        break;
-                    }
-                }
-
-                if (endIndex !== -1) {
-                    const objectString = buffer.substring(startIndex, endIndex + 1);
-                    try {
-                        const item = JSON.parse(objectString);
-                        if (item.suggestion && item.suggestion.type === 'predicate') {
-                            onSuggestionReceived(item.suggestion);
+        const response = await ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+            config: {
+                temperature: 0,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        suggestions: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    type: { type: Type.STRING, enum: ["predicate"] },
+                                    name: { type: Type.STRING },
+                                    justification: { type: Type.STRING },
+                                    exampleTriple: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            subject: { type: Type.STRING },
+                                            object: { type: Type.STRING }
+                                        },
+                                        required: ["subject", "object"]
+                                    }
+                                },
+                                required: ["type", "name", "justification", "exampleTriple"]
+                            }
                         }
-                    } catch (e) {
-                        console.warn('Could not parse potential JSON object from suggestion stream:', objectString);
-                    }
-                    lastIndex = endIndex + 1;
-                } else {
-                    break;
+                    },
+                    required: ["suggestions"]
                 }
             }
-            if (lastIndex > 0) buffer = buffer.substring(lastIndex);
-        }
-    } catch (e) {
+        });
+
         if (abortSignal.aborted) {
-            console.log("Suggestion stream intentionally aborted.");
-        } else if (e instanceof Error) {
-            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
-                onError(new Error("429 - Rate limit exceeded."));
-            } else {
-                onError(e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e);
-            }
-        } else {
-            onError(new Error("An unknown error occurred during suggestion generation."));
+            throw new Error("Aborted");
         }
-    } finally {
-        onStreamEnd();
+        
+        const result = JSON.parse(response.text);
+        return result.suggestions || [];
+
+    } catch (e) {
+        if (e instanceof Error) {
+            if (e.message === "Aborted") console.log("Suggestion generation intentionally aborted.");
+            if (e.message.includes('429') || e.message.toLowerCase().includes('rate limit')) {
+                throw new Error("429 - Rate limit exceeded.");
+            }
+            throw e.message.includes('API key not valid') ? new Error("The provided Gemini API key is not valid.") : e;
+        } else {
+            throw new Error("An unknown error occurred during suggestion generation.");
+        }
     }
 };
 
@@ -449,25 +378,6 @@ const generateTurboPrompt = (documentText: string, schema: Schema): string => {
     - The value of "triples" must be an array of triple objects.
     - Each triple object must have four keys: "subject" (string), "predicate" (string), "object" (string), and "evidenceText" (a direct quote from the source document).
     - Ensure all string values within the JSON are properly escaped.
-
-    Example Output:
-    {
-      "entities": ["Lingshui Formation", "Sandstone", "high porosity"],
-      "triples": [
-        {
-          "subject": "Lingshui Formation",
-          "predicate": "contains",
-          "object": "Sandstone",
-          "evidenceText": "The Lingshui Formation contains thick layers of sandstone."
-        },
-        {
-          "subject": "Sandstone",
-          "predicate": "hasProperty",
-          "object": "high porosity",
-          "evidenceText": "The report stated, \\"the sandstone exhibited high porosity.\\""
-        }
-      ]
-    }
 
     Now, process the following document text and generate the complete JSON output:
 
@@ -501,7 +411,28 @@ export const extractInTurboMode = async (
             model: modelName,
             contents: prompt,
             config: {
+                temperature: 0,
                 responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        entities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        triples: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    subject: { type: Type.STRING },
+                                    predicate: { type: Type.STRING },
+                                    object: { type: Type.STRING },
+                                    evidenceText: { type: Type.STRING }
+                                },
+                                required: ["subject", "predicate", "object", "evidenceText"]
+                            }
+                        }
+                    },
+                    required: ["entities", "triples"]
+                }
             }
         });
         
@@ -509,8 +440,7 @@ export const extractInTurboMode = async (
             throw new Error("Aborted");
         }
 
-        const rawJson = response.text;
-        const result = JSON.parse(rawJson);
+        const result = JSON.parse(response.text);
 
         if (result.entities && Array.isArray(result.entities) && result.triples && Array.isArray(result.triples)) {
             return result;
