@@ -1,5 +1,3 @@
-
-
 import React, { useState } from 'react';
 import type { Schema } from '../types';
 import { EditIcon, SaveIcon, ResetIcon, PlusIcon, XIcon, TrashIcon, InfoIcon, LockClosedIcon, LockOpenIcon, ChevronDownIcon, ChevronRightIcon } from './icons';
@@ -149,10 +147,11 @@ const EditableAxisContent: React.FC<{
     path: (string | number)[];
     schema: Schema;
     onSchemaChange: (newSchema: Schema) => void;
+    onRenameKey: (path: (string|number)[], oldKey: string, newKey: string) => void;
     isEditingEnabled: boolean;
     expandedItems: Record<string, boolean>;
     toggleItem: (key: string) => void;
-}> = ({ data, path, schema, onSchemaChange, isEditingEnabled, expandedItems, toggleItem }) => {
+}> = ({ data, path, schema, onSchemaChange, onRenameKey, isEditingEnabled, expandedItems, toggleItem }) => {
 
     const handleUpdate = (newPath: (string | number)[], value: any) => {
         onSchemaChange(updateSchemaDeeply(schema, newPath, value));
@@ -191,7 +190,7 @@ const EditableAxisContent: React.FC<{
                         const key = Object.keys(item)[0];
                         return (
                             <div key={key} className="w-full">
-                                <EditableAxisContent data={{[key]: item[key]}} path={itemPath} schema={schema} onSchemaChange={onSchemaChange} isEditingEnabled={isEditingEnabled} expandedItems={expandedItems} toggleItem={toggleItem}/>
+                                <EditableAxisContent data={{[key]: item[key]}} path={itemPath} schema={schema} onSchemaChange={onSchemaChange} onRenameKey={onRenameKey} isEditingEnabled={isEditingEnabled} expandedItems={expandedItems} toggleItem={toggleItem}/>
                             </div>
                         )
                     }
@@ -233,14 +232,14 @@ const EditableAxisContent: React.FC<{
                                     <div className="w-6 mr-1"></div> // Placeholder for alignment
                                 )}
                                 <EditableItem item={key}
-                                onUpdate={newKey => onSchemaChange(updateSchemaDeeply(schema, path, {...data, [newKey]: value, [key]: '---DELETE---'}))}
+                                onUpdate={newKey => onRenameKey(path, key, newKey)}
                                 onDelete={() => handleUpdate(keyPath, '---DELETE---')}
                                 isEditingEnabled={isEditingEnabled}
                                 />
                             </div>
                             {isExpanded && isCollapsible && (
                                 <div className="flex flex-wrap gap-2 pl-7">
-                                    <EditableAxisContent data={value} path={keyPath} schema={schema} onSchemaChange={onSchemaChange} isEditingEnabled={isEditingEnabled} expandedItems={expandedItems} toggleItem={toggleItem}/>
+                                    <EditableAxisContent data={value} path={keyPath} schema={schema} onSchemaChange={onSchemaChange} onRenameKey={onRenameKey} isEditingEnabled={isEditingEnabled} expandedItems={expandedItems} toggleItem={toggleItem}/>
                                 </div>
                             )}
                         </div>
@@ -268,6 +267,20 @@ const SchemaViewer: React.FC<SchemaEditorProps> = ({ schema, onSchemaChange, onS
   const toggleItem = (key: string) => {
       setExpandedItems(prev => ({ ...prev, [key]: !prev[key] }));
   };
+
+  const handleRenameKey = (path: (string|number)[], oldKey: string, newKey: string) => {
+        const newSchema = JSON.parse(JSON.stringify(schema));
+        let parent: any = newSchema;
+        for (const p of path) {
+            parent = parent[p];
+        }
+        if (parent && typeof parent === 'object' && oldKey in parent) {
+            const value = parent[oldKey];
+            delete parent[oldKey];
+            parent[newKey] = value;
+            onSchemaChange(newSchema);
+        }
+    };
   
   const handleAddPredicateCategory = (name: string): boolean => {
       if (Object.keys(schema.predicates.predicateCategories).some(c => c.toLowerCase() === name.toLowerCase())) {
@@ -356,7 +369,7 @@ const SchemaViewer: React.FC<SchemaEditorProps> = ({ schema, onSchemaChange, onS
                                     {isExpanded ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
                                 </button>
                                 <EditableItem item={category}
-                                    onUpdate={newCat => onSchemaChange(updateSchemaDeeply(schema, ['predicates', 'predicateCategories'], {...schema.predicates.predicateCategories, [newCat]: predicates, [category]: '---DELETE---'}))}
+                                    onUpdate={newCat => handleRenameKey(['predicates', 'predicateCategories'], category, newCat)}
                                     onDelete={() => onSchemaChange(updateSchemaDeeply(schema, ['predicates', 'predicateCategories', category], '---DELETE---'))}
                                     isEditingEnabled={isEditing}
                                 />
@@ -401,12 +414,12 @@ const SchemaViewer: React.FC<SchemaEditorProps> = ({ schema, onSchemaChange, onS
                                 {isExpanded ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
                             </button>
                              <EditableItem item={category}
-                                onUpdate={newCat => onSchemaChange(updateSchemaDeeply(schema, ['observableAxis'], {...schema.observableAxis, [newCat]: data, [category]: '---DELETE---'}))}
+                                onUpdate={newCat => handleRenameKey(['observableAxis'], category, newCat)}
                                 onDelete={() => onSchemaChange(updateSchemaDeeply(schema, ['observableAxis', category], '---DELETE---'))}
                                 isEditingEnabled={isEditing}
                              />
                         </h3>
-                        {isExpanded && <EditableAxisContent data={data.concepts} path={['observableAxis', category, 'concepts']} schema={schema} onSchemaChange={onSchemaChange} isEditingEnabled={isEditing} expandedItems={expandedItems} toggleItem={toggleItem}/>}
+                        {isExpanded && <EditableAxisContent data={data.concepts} path={['observableAxis', category, 'concepts']} schema={schema} onSchemaChange={onSchemaChange} onRenameKey={handleRenameKey} isEditingEnabled={isEditing} expandedItems={expandedItems} toggleItem={toggleItem}/>}
                     </div>
                 );
             })}
@@ -430,12 +443,12 @@ const SchemaViewer: React.FC<SchemaEditorProps> = ({ schema, onSchemaChange, onS
                                 {isExpanded ? <ChevronDownIcon className="w-4 h-4" /> : <ChevronRightIcon className="w-4 h-4" />}
                             </button>
                              <EditableItem item={category}
-                                onUpdate={newCat => onSchemaChange(updateSchemaDeeply(schema, ['interpretiveAxis'], {...schema.interpretiveAxis, [newCat]: data, [category]: '---DELETE---'}))}
+                                onUpdate={newCat => handleRenameKey(['interpretiveAxis'], category, newCat)}
                                 onDelete={() => onSchemaChange(updateSchemaDeeply(schema, ['interpretiveAxis', category], '---DELETE---'))}
                                 isEditingEnabled={isEditing}
                              />
                         </h3>
-                        {isExpanded && <EditableAxisContent data={data.concepts} path={['interpretiveAxis', category, 'concepts']} schema={schema} onSchemaChange={onSchemaChange} isEditingEnabled={isEditing} expandedItems={expandedItems} toggleItem={toggleItem}/>}
+                        {isExpanded && <EditableAxisContent data={data.concepts} path={['interpretiveAxis', category, 'concepts']} schema={schema} onSchemaChange={onSchemaChange} onRenameKey={handleRenameKey} isEditingEnabled={isEditing} expandedItems={expandedItems} toggleItem={toggleItem}/>}
                     </div>
                 );
             })}

@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { Triple, Schema, ExtractedEntity, ExtractionStep, DocumentChunk, PaperCore, FitReport, SchemaProposal, ProcessingStats, LlmConfig, PromptCollection } from './types';
 import { View } from './types';
@@ -28,6 +27,8 @@ interface ManagedFile {
     status: { step: ExtractionStep; message?: string };
 }
 
+type ActiveResultTab = 'analysis' | 'triples' | 'entities' | 'graph';
+
 const semverMinorBump = (version: string): string => {
     let [major, minor, patch] = version.split('.').map(Number);
     minor++;
@@ -47,7 +48,7 @@ const App: React.FC = () => {
 
   const [error, setError] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<View>(View.Extractor);
-  const [activeResultTab, setActiveResultTab] = useState<'analysis' | 'triples' | 'entities' | 'graph'>('analysis');
+  const [activeResultTab, setActiveResultTab] = useState<ActiveResultTab>('analysis');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -309,7 +310,7 @@ const App: React.FC = () => {
     </div>
   );
 
-  const TabButton: React.FC<{name: typeof activeResultTab, label: string, icon: React.ReactNode, count: number}> = ({name, label, icon, count}) => (
+  const TabButton: React.FC<{name: ActiveResultTab, label: string, icon: React.ReactNode, count: number}> = ({name, label, icon, count}) => (
     <button
         onClick={() => setActiveResultTab(name)}
         disabled={count === 0}

@@ -63,7 +63,7 @@ const PromptEditor: React.FC<{ prompt: Prompt; onSave: (newTemplate: string) => 
              />
              <div className="mt-2 text-xs text-gray-500 bg-blue-50 p-2 rounded-md flex items-start">
                 <InfoIcon className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0 text-blue-500" />
-                <span>{'Placeholders like `{{variable_name}}` are filled in automatically during processing. Editing these may break functionality if the code expects them.'}</span>
+                <span>{`Placeholders like {{variable_name}} are filled in automatically during processing. Editing these may break functionality if the code expects them.`}</span>
              </div>
         </div>
     );
