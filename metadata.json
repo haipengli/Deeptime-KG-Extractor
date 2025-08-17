@@ -1,0 +1,5 @@
+{
+  "name": "DeepTime KG Extractor",
+  "description": "An AI-powered tool to extract knowledge graphs from deep-time scientific literature. It uses a controlled vocabulary to identify entities and relationships, anchoring all extractions to textual evidence from the source document.",
+  "requestFramePermissions": []
+}
