@@ -1,16 +1,15 @@
 
-
 import type { Schema } from './types';
 
 export const DEFAULT_SCHEMA: Schema = {
   meta: {
-    id: 'DeepTimeLabelSet-v0.9.0',
+    id: 'DeepTimeLabelSet-v0.9.1',
     purpose: 'LLM-driven KG extraction from scientific papers: evidence-anchored, audit-ready. Optimized for entity & relationship extraction in deep-time research with a typed ontology.',
   },
   predicates: {
     predicateCategories: {
       "Taxonomic & Definitional": [
-        'definesBy', 'expandsTo', 'inRealm', 'hasSystemType', 'hasDomain', 'hasDepositionalElement', 'hasMorphoformScale', 'partOf', 'equivalentTo', 'distinguishes', 'indistinguishableFrom', 'hasPart'
+        'isA', 'belongsToTaxon', 'definesBy', 'expandsTo', 'inRealm', 'hasSystemType', 'hasDomain', 'hasDepositionalElement', 'hasMorphoformScale', 'partOf', 'equivalentTo', 'distinguishes', 'indistinguishableFrom', 'hasPart'
       ],
       "Stratigraphic & Spatial": [
         'overlies', 'underlies', 'lateralEquivalentOf', 'timeEquivalentOf', 'correlativeTo', 'contains', 'locatedIn', 'occursIn', 'occursOn', 'absentFrom',
@@ -29,6 +28,16 @@ export const DEFAULT_SCHEMA: Schema = {
       ]
     },
     definitions: {
+        isA: {
+            description: "Represents taxonomic hierarchy, indicating that the subject is a subtype or instance of the object.",
+            domain: ["Taxon"],
+            range: ["Taxon"],
+        },
+        belongsToTaxon: {
+            description: "Links a specific specimen or fossil to its classified taxon.",
+            domain: ["Specimen", "IndexFossil"],
+            range: ["Taxon"],
+        },
         partOf: {
             description: "Hierarchical membership for time, space, or stratigraphy. The subject is a component of the object.",
             domain: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "DepositionalElement", "Member", "Stage"],
@@ -41,17 +50,17 @@ export const DEFAULT_SCHEMA: Schema = {
         },
         locatedIn: {
             description: "Specifies that the subject is geographically located within the object. For spatial containment only.",
-            domain: ["Location", "GeologicObject", "GeologicUnit", "OutcropSection", "WellBorehole", "Basin", "Formation"],
-            range: ["Location", "Basin"],
+            domain: ["Location", "GeologicObject", "GeologicUnit", "OutcropSection", "WellBorehole", "Basin", "Formation", "Specimen", "Taxon"],
+            range: ["Location", "Basin", "Formation"],
         },
         contains: {
             description: "Specifies that the subject geographically contains the object. The inverse of locatedIn. Use for spatial relationships, not for properties or components.",
-            domain: ["Location", "Basin"],
-            range: ["Location", "GeologicObject", "GeologicUnit", "OutcropSection", "WellBorehole", "Basin", "Formation"],
+            domain: ["Location", "Basin", "Formation"],
+            range: ["Location", "GeologicObject", "GeologicUnit", "OutcropSection", "WellBorehole", "Basin", "Formation", "Specimen", "Taxon"],
         },
         hasAge: {
             description: "Assigns a geologic time unit or absolute age to a geologic feature or event.",
-            domain: ["GeologicUnit", "RockObject", "GeologicFeatureMorphologic", "Events", "Location", "Formation"],
+            domain: ["GeologicUnit", "RockObject", "GeologicFeatureMorphologic", "Events", "Location", "Formation", "Taxon", "Specimen"],
             range: ["GeologicTimeUnitNamed", "AbsoluteAgeValue", "System", "Series", "Stage"],
         },
         timeEquivalentOf: {

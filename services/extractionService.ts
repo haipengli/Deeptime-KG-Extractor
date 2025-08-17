@@ -1,5 +1,4 @@
 
-
 import { GoogleGenAI, Type } from "@google/genai";
 import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput, ExtractedEntity } from '../types';
 
@@ -38,8 +37,8 @@ const generatePredicateReference = (schema: Schema): string => {
             return `
 - Predicate: "${name}"
   - Description: ${def.description}
-  - Valid Subject Types (Domain): [${def.domain.join(', ')}]
-  - Valid Object Types (Range): [${def.range.join(', ')}]
+  - Valid Subject Types (Domain): [${def.domain.join(', ') || 'Any'}]
+  - Valid Object Types (Range): [${def.range.join(', ') || 'Any'}]
 `;
         }).join('');
 };
@@ -51,11 +50,15 @@ const generateEntityPrompt = (documentText: string, schema: Schema): string => {
   const allConcepts = getAllConcepts(schema);
 
   return `
-    You are an expert AI assistant specializing in geological knowledge extraction. Your goal is to extract specific *instances* of the concepts defined in the schema. All extracted entities MUST be nouns or noun phrases.
-    Your task is to identify and list all potential named entities from the text and assign a type to each one.
+    You are an expert AI assistant specializing in geological and paleontological knowledge extraction. Your goal is to extract specific *instances* of the concepts defined in the schema from scientific texts. All extracted entities MUST be nouns or noun phrases.
+
+    Your task is to identify and list all potential named entities from the text and assign a type to each one, ensuring you capture a balanced view of all entity types present, from geological formations to biological taxa.
 
     You will perform two types of extraction simultaneously:
-    1.  **Existing Entities**: Identify entities that are specific instances of the concepts in the provided schema. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types". For example, if you find 'Lingshui Formation', its type should be 'Formation'.
+    1.  **Existing Entities**: Identify entities that are specific instances of the concepts in the provided schema. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types".
+        - **Geological Example**: If you find 'Cedar Mountain Formation', its type should be 'Formation'.
+        - **Paleontological Example**: If you find 'Utahraptor', its type should be 'Taxon'.
+        - **Specimen Example**: If you find a reference to a specific fossil bone, its type should be 'Specimen'.
     2.  **New Entity Suggestions**: Identify important, abstract, high-level domain-specific concepts that are NOT in the schema but should be. For example, 'Depositional Sequence' would be a good suggestion if it's a recurring theme not in the schema.
 
     Valid Entity Types:
@@ -174,7 +177,7 @@ const generateRelationshipPrompt = (documentText: string, schema: Schema, entiti
 
     **CRITICAL INSTRUCTIONS:**
     1.  **USE ONLY PROVIDED ENTITIES**: You MUST ONLY use the entities from the "Typed Entity List" for the subjects and objects of your triples. Do not invent new entities.
-    2.  **STRICTLY ADHERE TO ONTOLOGY**: For each triple you generate, you MUST consult the "Predicate Reference Guide". The type of your chosen subject MUST be present in the predicate's "Domain" list, and the type of your chosen object MUST be present in the predicate's "Range" list.
+    2.  **STRICTLY ADHERE TO ONTOLOGY**: For each triple you generate, you MUST consult the "Predicate Reference Guide". The type of your chosen subject MUST be present in the predicate's "Domain" list, and the type of your chosen object MUST be present in the predicate's "Range" list. If a domain or range is empty (i.e., 'Any'), it can match any entity type.
     3.  **NO DOMAIN/RANGE VIOLATIONS**: If a relationship seems plausible but violates the domain/range constraints for a predicate, DO NOT extract it. Adherence to the schema is more important than capturing every possible relationship.
     4.  **EVIDENCE IS MANDATORY**: Every triple must be supported by a direct quote from the text, which you will provide in the "evidenceText" field.
 

@@ -83,3 +83,14 @@ export interface TurboOutput {
     entities: Omit<ExtractedEntity, 'selected'>[];
     triples: Omit<Triple, 'source'>[];
 }
+
+export interface ProcessingStats {
+  filesProcessed: number;
+  entitiesFound: number;
+  triplesExtracted: number;
+  totalDurationSeconds: number;
+  entityExtractionDuration?: number;
+  relationshipExtractionDuration?: number;
+  entityTypeCounts: Record<string, number>;
+  predicateTypeCounts: Record<string, number>;
+}

@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { FileIcon, TrashIcon, LoaderIcon, CheckCircleIcon, AlertTriangleIcon, ClockIcon, CheckboxCheckedIcon, CheckboxUncheckedIcon, DatabaseIcon, ChevronDownIcon, ChevronRightIcon } from './icons';
 import type { ExtractionStep, DocumentSection } from '../types';
@@ -107,7 +106,7 @@ const FileList: React.FC<FileListProps> = ({ files, selectedFiles, onFileSelecti
                                     <div key={index} className="flex items-center">
                                         <button onClick={() => onSectionSelectionChange(file.name, index, !section.selected)} className="flex items-center space-x-2 w-full text-left p-1 rounded-md hover:bg-gray-100">
                                             {section.selected ? <CheckboxCheckedIcon className="w-5 h-5 text-brand-secondary flex-shrink-0"/> : <CheckboxUncheckedIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />}
-                                            <span className="text-xs truncate" title={section.title}>{section.title}</span>
+                                            <span className="text-xs truncate text-gray-800" title={section.title}>{section.title}</span>
                                         </button>
                                     </div>
                                 )) : (
