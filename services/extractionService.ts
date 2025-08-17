@@ -1,6 +1,6 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import type { Triple, Schema, LLMProvider, SchemaSuggestion, TurboOutput, ExtractedEntity } from '../types';
+import { preprocessText, Candidate } from './stratigraphyPreprocess';
 
 // --- Utility Functions ---
 
@@ -31,8 +31,8 @@ const getAllConcepts = (schema: Schema): string[] => {
 };
 
 
-const generatePredicateReference = (schema: Schema): string => {
-    return Object.entries(schema.predicates.definitions)
+const generatePredicateReference = (definitions: Record<string, any>): string => {
+    return Object.entries(definitions)
         .map(([name, def]) => {
             return `
 - Predicate: "${name}"
@@ -43,39 +43,73 @@ const generatePredicateReference = (schema: Schema): string => {
         }).join('');
 };
 
+// --- Multi-pass Entity Extraction ---
 
-// --- Step 1: Entity Extraction with Suggestions ---
+const generateStratigraphyEntityPrompt = (cleanText: string, candidates: Candidate[]): string => {
+    const candidateHints = candidates.map(c => ({ name: c.name, type: c.type }));
+    return `
+You extract ONLY stratigraphy/locality/time entities from the provided text chunk.
+Allowed entity types (exact spelling):
+- Formation
+- Member
+- Group
+- Locality
+- ChronostratigraphicUnit
 
-const generateEntityPrompt = (documentText: string, schema: Schema): string => {
+Rules:
+- Expand abbreviations: Fm.->Formation, Mbr.->Member, Gp.->Group, Mtn./Mt.->Mountain.
+- Rejoined hyphenations like "Cedar Moun- / tain Formation" must be treated as "Cedar Mountain Formation".
+- Do NOT extract taxa or anatomical specimens here.
+- Return STRICT JSON: an array of entities with the exact schema below. No prose.
+
+Entity schema (JSON):
+[
+  {
+    "name": "string",
+    "type": "Formation"|"Member"|"Group"|"Locality"|"ChronostratigraphicUnit",
+    "confidence": 0.9,
+    "justification": "string",
+    "evidenceText": "string"
+  }
+]
+
+If nothing is present, return [].
+
+TEXT (preprocessed):
+${cleanText}
+
+CANDIDATE HINTS (optional, from regex):
+${JSON.stringify(candidateHints, null, 2)}
+`;
+};
+
+const generateAnatomyTaxaEntityPrompt = (cleanText: string, schema: Schema): string => {
   const allConcepts = getAllConcepts(schema);
 
   return `
-    You are an expert AI assistant specializing in geological and paleontological knowledge extraction. Your goal is to extract specific *instances* of the concepts defined in the schema from scientific texts. All extracted entities MUST be nouns or noun phrases.
+    You are an expert AI assistant specializing in geological and paleontological knowledge extraction. Your goal is to extract BIOLOGICAL entities and suggest NEW high-level concepts for the schema.
 
-    Your task is to identify and list all potential named entities from the text and assign a type to each one, ensuring you capture a balanced view of all entity types present, from geological formations to biological taxa.
-
+    Your task is to identify and list all potential biological named entities and assign a type to each one.
     You will perform two types of extraction simultaneously:
-    1.  **Existing Entities**: Identify entities that are specific instances of the concepts in the provided schema. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types".
-        - **Geological Example**: If you find 'Cedar Mountain Formation', its type should be 'Formation'.
-        - **Paleontological Example**: If you find 'Utahraptor', its type should be 'Taxon'.
-        - **Specimen Example**: If you find a reference to a specific fossil bone, its type should be 'Specimen'.
-    2.  **New Entity Suggestions**: Identify important, abstract, high-level domain-specific concepts that are NOT in the schema but should be. For example, 'Depositional Sequence' would be a good suggestion if it's a recurring theme not in the schema.
+    1.  **Existing Biological Entities**: Identify entities that are specific instances of biological concepts like 'Taxon' or 'Specimen'.
+    2.  **New Entity Suggestions**: Identify important, abstract, high-level domain-specific concepts that are NOT in the schema but should be.
 
-    Valid Entity Types:
-    [${allConcepts.join(', ')}]
+    Valid Biological Entity Types:
+    [Taxon, Specimen, IndexFossil, Biozone]
 
     Output Format:
     Your output MUST be a single, valid JSON object conforming to the required schema. It should contain two keys: 'entities' (an array of entity objects) and 'suggestions' (an array of suggestion objects).
     - For each entity, provide a 'name', its assigned 'type' from the list above, a 'confidence' score (0.0 to 1.0), and a brief 'justification'.
     - 'justification' should explain why the text supports the extraction and typing.
 
-    Now, process the following document text and extract all relevant entities and suggestions.
+    Now, process the following document text and extract all relevant biological entities and suggestions.
 
     --- DOCUMENT START ---
-    ${documentText}
+    ${cleanText}
     --- DOCUMENT END ---
   `;
 };
+
 
 export const extractEntities = async (
     provider: LLMProvider,
@@ -92,13 +126,42 @@ export const extractEntities = async (
         throw new Error('Gemini API key is missing.');
     }
 
-    const prompt = generateEntityPrompt(documentText, schema);
+    const { cleanText, candidates } = preprocessText(documentText);
     const ai = new GoogleGenAI({ apiKey });
 
     try {
-        const response = await ai.models.generateContent({
+        // Pass 1: Stratigraphy
+        const stratPrompt = generateStratigraphyEntityPrompt(cleanText, candidates);
+        const stratResponse = await ai.models.generateContent({
             model: modelName,
-            contents: prompt,
+            contents: stratPrompt,
+            config: {
+                temperature: 0,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            name: { type: Type.STRING },
+                            type: { type: Type.STRING },
+                            confidence: { type: Type.NUMBER },
+                            justification: { type: Type.STRING },
+                            evidenceText: { type: Type.STRING },
+                        },
+                        required: ["name", "type", "confidence", "justification", "evidenceText"]
+                    }
+                }
+            }
+        });
+        if (abortSignal.aborted) throw new Error("Aborted");
+        const stratEntities = JSON.parse(stratResponse.text);
+
+        // Pass 2: Anatomy, Taxa, and Suggestions
+        const anatomyPrompt = generateAnatomyTaxaEntityPrompt(cleanText, schema);
+        const anatomyResponse = await ai.models.generateContent({
+             model: modelName,
+            contents: anatomyPrompt,
             config: {
                 temperature: 0,
                 responseMimeType: "application/json",
@@ -135,21 +198,18 @@ export const extractEntities = async (
                 }
             }
         });
+        if (abortSignal.aborted) throw new Error("Aborted");
+        const anatomyResult = JSON.parse(anatomyResponse.text);
 
-        if (abortSignal.aborted) {
-            throw new Error("Aborted");
-        }
-        
-        const result = JSON.parse(response.text);
-        
-        const formattedSuggestions: SchemaSuggestion[] = result.suggestions.map((s: any) => ({
+        const allEntities = [...stratEntities, ...anatomyResult.entities];
+        const formattedSuggestions: SchemaSuggestion[] = anatomyResult.suggestions.map((s: any) => ({
             type: 'entity',
             name: s.name,
             categorySuggestion: s.categorySuggestion,
             justification: s.justification,
         }));
-
-        return { entities: result.entities, suggestions: formattedSuggestions };
+        
+        return { entities: allEntities, suggestions: formattedSuggestions };
 
     } catch (e) {
          if (e instanceof Error) {
@@ -164,11 +224,10 @@ export const extractEntities = async (
     }
 };
 
-
-// --- Step 2: Relationship Extraction ---
+// --- Relationship Extraction ---
 
 const generateRelationshipPrompt = (documentText: string, schema: Schema, entities: ExtractedEntity[]): string => {
-  const predicateReference = generatePredicateReference(schema);
+  const predicateReference = generatePredicateReference(schema.predicates.definitions);
   const typedEntitiesString = entities.map(e => `- "${e.name}" (type: ${e.type})`).join('\n');
 
   return `
@@ -216,8 +275,9 @@ export const extractRelationships = async (
      if (!apiKey) {
         throw new Error('Gemini API key is missing.');
     }
-
-    const prompt = generateRelationshipPrompt(documentText, schema, entities);
+    
+    const { cleanText } = preprocessText(documentText);
+    const prompt = generateRelationshipPrompt(cleanText, schema, entities);
     const ai = new GoogleGenAI({ apiKey });
 
      try {
@@ -271,12 +331,12 @@ export const extractRelationships = async (
     }
 };
 
-
-// --- Step 3: Relationship Suggestion ---
+// --- Relationship Suggestion ---
 
 const generateRelationshipSuggestionPrompt = (documentText: string, schema: Schema, entities: ExtractedEntity[]): string => {
   const existingPredicates = Object.keys(schema.predicates.definitions).join(', ');
   const typedEntitiesString = entities.map(e => `- "${e.name}" (type: ${e.type})`).join('\n');
+  const { cleanText } = preprocessText(documentText);
 
   return `
     You are a knowledge graph ontologist. Your task is to analyze the provided text for meaningful relationships between the given typed entities that are NOT captured by the existing predicate schema.
@@ -297,7 +357,7 @@ const generateRelationshipSuggestionPrompt = (documentText: string, schema: Sche
     Now, analyze the following text for novel relationship suggestions:
 
     --- DOCUMENT START ---
-    ${documentText}
+    ${cleanText}
     --- DOCUMENT END ---
   `;
 };
@@ -376,13 +436,14 @@ export const suggestRelationships = async (
 
 // --- NEW: Turbo Mode Extraction ---
 
-const generateTurboPrompt = (documentText: string, schema: Schema): string => {
+const generateTurboPrompt = (documentText: string, schema: Schema, candidates: Candidate[]): string => {
   const allConcepts = getAllConcepts(schema);
-  const predicateReference = generatePredicateReference(schema);
+  const predicateReference = generatePredicateReference(schema.predicates.definitions);
+  const candidateHints = candidates.map(c => ({ name: c.name, type: c.type }));
   
   return `
-    You are a highly efficient knowledge extraction engine with a strict adherence to a provided ontology. Your task is to perform a two-step process in a single pass:
-    1.  **Entity Identification & Typing**: First, read the entire document text and identify all specific *instances* of concepts. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types". All entities MUST be nouns or noun phrases.
+    You are a highly efficient knowledge extraction engine with a strict adherence to a provided ontology. Your task is to perform a two-step process in a single pass using pre-processed text and candidate hints:
+    1.  **Entity Identification & Typing**: First, read the entire document text and identify all specific *instances* of concepts. For each entity, you MUST assign a 'type' from the list of "Valid Entity Types". All entities MUST be nouns or noun phrases. Use the Candidate Hints to guide your extraction of stratigraphic entities.
     2.  **Triple Extraction with Schema Enforcement**: Second, using ONLY the typed entities you just identified and the predicates from the "Predicate Reference Guide", extract all possible Subject-Predicate-Object triples. The type of your chosen subject MUST be in the predicate's "Domain" list, and the type of your chosen object MUST be in the predicate's "Range" list.
 
     Valid Entity Types:
@@ -390,6 +451,9 @@ const generateTurboPrompt = (documentText: string, schema: Schema): string => {
 
     Predicate Reference Guide:
     ${predicateReference}
+    
+    CANDIDATE HINTS (optional, from regex):
+    ${JSON.stringify(candidateHints, null, 2)}
 
     Output Format:
     Your output MUST be a single, valid JSON object.
@@ -422,7 +486,8 @@ export const extractInTurboMode = async (
         throw new Error('Gemini API key is missing.');
     }
 
-    const prompt = generateTurboPrompt(documentText, schema);
+    const { cleanText, candidates } = preprocessText(documentText);
+    const prompt = generateTurboPrompt(cleanText, schema, candidates);
     const ai = new GoogleGenAI({ apiKey });
     
     try {

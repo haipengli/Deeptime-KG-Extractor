@@ -149,7 +149,7 @@ const GraphViewer: React.FC<GraphViewerProps> = ({ triples, entities }) => {
     }, [cy, confidence, selectedPredicates, selectedEntityTypes, elements]);
 
 
-    const stylesheet: cytoscape.Stylesheet = [
+    const stylesheet: cytoscape.StylesheetCSS[] = [
         {
             selector: 'node',
             style: {

@@ -1,4 +1,3 @@
-
 import type { Schema } from './types';
 
 export const DEFAULT_SCHEMA: Schema = {
@@ -40,13 +39,13 @@ export const DEFAULT_SCHEMA: Schema = {
         },
         partOf: {
             description: "Hierarchical membership for time, space, or stratigraphy. The subject is a component of the object.",
-            domain: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "DepositionalElement", "Member", "Stage"],
-            range: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "FluvialDomain", "Formation", "Series", "System"],
+            domain: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "DepositionalElement", "Member", "Stage", "Formation"],
+            range: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "FluvialDomain", "Formation", "Series", "System", "Group"],
         },
         hasPart: {
             description: "Inverse of partOf. The subject contains the object as a component.",
-            domain: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "FluvialDomain", "Formation", "Series", "System"],
-            range: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "DepositionalElement", "Member", "Stage"],
+            domain: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "FluvialDomain", "Formation", "Series", "System", "Group"],
+            range: ["GeologicTimeUnitNamed", "Location", "LithostratigraphicUnit", "ChronostratigraphicUnit", "DepositionalElement", "Member", "Stage", "Formation"],
         },
         locatedIn: {
             description: "Specifies that the subject is geographically located within the object. For spatial containment only.",
@@ -60,8 +59,8 @@ export const DEFAULT_SCHEMA: Schema = {
         },
         hasAge: {
             description: "Assigns a geologic time unit or absolute age to a geologic feature or event.",
-            domain: ["GeologicUnit", "RockObject", "GeologicFeatureMorphologic", "Events", "Location", "Formation", "Taxon", "Specimen"],
-            range: ["GeologicTimeUnitNamed", "AbsoluteAgeValue", "System", "Series", "Stage"],
+            domain: ["GeologicUnit", "RockObject", "GeologicFeatureMorphologic", "Events", "Location", "Formation", "Member", "Taxon", "Specimen"],
+            range: ["GeologicTimeUnitNamed", "AbsoluteAgeValue", "System", "Series", "Stage", "ChronostratigraphicUnit"],
         },
         timeEquivalentOf: {
             description: "Indicates that two geologic units or time intervals are of the same age, though they may differ in other properties. Use for explicit statements of equivalence.",
@@ -95,8 +94,8 @@ export const DEFAULT_SCHEMA: Schema = {
         },
         occursIn: {
             description: "Denotes the presence of a feature, process, or substance within a location or unit.",
-            domain: ["GeologicFeatureMorphologic", "Events", "RockOrigin"],
-            range: ["Location", "Realm", "DepositionalEnvironment", "GeologicUnit"],
+            domain: ["GeologicFeatureMorphologic", "Events", "RockOrigin", "Taxon", "Specimen"],
+            range: ["Location", "Realm", "DepositionalEnvironment", "GeologicUnit", "Formation", "Member"],
         },
     },
     alias_map: {
@@ -122,7 +121,7 @@ export const DEFAULT_SCHEMA: Schema = {
     }
   },
   observableAxis: {
-    Time: { concepts: ['AbsoluteAgeValue', 'GeologicTimeUnitNamed'] },
+    Time: { concepts: ['AbsoluteAgeValue', 'GeologicTimeUnitNamed', 'ChronostratigraphicUnit'] },
     Space: { concepts: ['Location', 'Geometry', 'CRS'] },
     GeologicObject: { concepts: ['RockObject', 'Specimen', 'Sample', 'WellBorehole', 'Core', 'OutcropSection', 'SeismicSectionCube'] },
     GeologicUnit: { concepts: [{ LithostratigraphicUnit: ['Supergroup', 'Group', 'Formation', 'Member', 'Bed'] }, { ChronostratigraphicUnit: ['System', 'Series', 'Stage'] }] },
